@@ -85,10 +85,11 @@ to reproduce specific paper results.
 
 The artifact targets the same class of machine used in the paper:
 
-- **Hardware:** an Intel Skylake-X server with a tiered memory layout. The
-  paper uses CloudLab `c220g5` (96 GB DRAM per socket, 2 NUMA nodes), with the
-  remote NUMA node configured to emulate a slower (CXL-like) tier. PEBS and
-  CHA uncore counters are required for PAC sampling.
+- **Hardware:** an Intel server with a tiered memory layout - Skylake-X /
+  Cascade Lake, Sapphire Rapids, or Emerald Rapids (see Limitations). The
+  paper uses CloudLab `c220g5` (Skylake-X, 96 GB DRAM per socket, 2 NUMA
+  nodes), with the remote NUMA node configured to emulate a slower (CXL-like)
+  tier. PEBS and CHA uncore counters are required for PAC sampling.
 - **Kernel:** vanilla **Linux 6.3** for PACT (built by
   [`setup/kernel/`](setup/kernel/)). Baselines use their own kernel versions -
   see [`baselines/`](baselines/).
@@ -206,11 +207,15 @@ documenting the exact kernel tag and build steps.
 This is a research artifact built to reproduce the paper's results. A few
 constraints of the current implementation are worth knowing up front:
 
-- **Intel Skylake-X only.** The PMU event codes, the CHA-to-core mapping, and
-  the PAC model constants (`k_dram`, `k_cxl`) are calibrated for Skylake-X
-  (e.g. CloudLab `c220g5`). PACT **aborts on an unrecognized CPU** by default
-  rather than produce invalid results; other microarchitectures (Emerald/
-  Sapphire Rapids, AMD) are not yet calibrated.
+- **Intel server uarchs only (SKX, SPR, EMR).** PACT ships PMU descriptors for
+  Skylake-X / Cascade Lake (e.g. CloudLab `c220g5`) and Sapphire Rapids /
+  Emerald Rapids. The core DRD and CHA-TOR event encodings for all three are
+  validated on real silicon; the SPR/EMR PAC latency constants (`k_dram`,
+  `k_cxl`) currently reuse the SKX values pending per-uarch calibration, so
+  absolute PAC magnitudes on SPR/EMR are approximate (tiering decisions, which
+  depend on relative PAC, are unaffected). PACT **aborts on an unrecognized
+  CPU** by default rather than produce invalid results; other
+  microarchitectures (Granite Rapids, AMD) are not yet supported.
 - **Two tiers, single node.** PACT assumes one fast tier (local DRAM) and one
   CXL-like slow tier on a 2-NUMA-node host. More than two tiers, multi-socket
   fan-out, and multi-node setups are out of scope for this release.

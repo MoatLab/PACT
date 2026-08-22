@@ -6,7 +6,11 @@
 
 #include <stdint.h>
 
-typedef enum { PMU_PLATFORM_SKX = 0, PMU_PLATFORM_UNKNOWN } pmu_platform_id_t;
+typedef enum {
+    PMU_PLATFORM_SKX = 0, /* Skylake-X / Cascade Lake */
+    PMU_PLATFORM_EMR,     /* Sapphire Rapids / Emerald Rapids (shared CHA design) */
+    PMU_PLATFORM_UNKNOWN
+} pmu_platform_id_t;
 
 /*
  * Fully-built perf_event_attr config fields for a single TOR event.

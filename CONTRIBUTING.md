@@ -23,8 +23,9 @@ they pass locally first. Match the conventions in
 ## What can be tested without special hardware
 
 Most of PACT's algorithms build and run anywhere, but end-to-end operation
-needs an Intel Skylake-X-class NUMA host with working PEBS and CHA/uncore
-counters, root, and reboot access (see the [README](README.md) requirements). If
+needs a supported Intel server NUMA host (Skylake-X / Cascade Lake, Sapphire
+Rapids, or Emerald Rapids) with working PEBS and CHA/uncore counters, root, and
+reboot access (see the [README](README.md) requirements). If
 a change affects behavior that only manifests on that hardware, describe the
 machine you tested on (`./src/pact --version`, CPU model, kernel, `numactl -H`)
 and attach the relevant logs from `run/results/<workload>/pact/` in your pull
