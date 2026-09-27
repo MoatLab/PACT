@@ -1,0 +1,16 @@
+Subject: [PATCH] mm: remove unused Colloid tier-reset declaration
+
+The reset helper does not use a memory_tier pointer. Drop the declaration
+so CONFIG_WERROR builds succeed without weakening compiler checks.
+
+--- a/mm/memory-tiers.c
++++ b/mm/memory-tiers.c
+@@ -672,8 +672,6 @@
+ EXPORT_SYMBOL_GPL(colloid_init_memory_tier);
+ 
+ void colloid_clear_memory_tier(int node) {
+-	struct memory_tier *memtier;
+-
+ 	mutex_lock(&memory_tier_lock);
+ 	clear_node_memory_tier(node);
+ 	pr_info("clear_node_memory_tier");

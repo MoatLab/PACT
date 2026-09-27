@@ -46,3 +46,7 @@ its upstream authorship and the affected file's GPL-2.0 license. It does not
 change kernel tiering policy. The helper skips the fix when already present
 and stops if neither patch direction applies; it does not suppress compiler
 warnings. NBT and the Linux 6.3 baselines already contain this fix.
+
+Colloid-tpp and Soar/Alto also apply `common/colloid-build.patch`, which removes
+an unused declaration in the tier-reset helper so `CONFIG_WERROR=y` builds
+succeed. It leaves the helper's operations and tiering policy unchanged.

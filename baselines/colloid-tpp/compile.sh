@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KERNEL_DIR="$SCRIPT_DIR/linux"
 LOGF="$SCRIPT_DIR/log"
-PATCHES=("$SCRIPT_DIR/colloid-skx.patch" "$SCRIPT_DIR/colloid-skx-alto.patch")
+PATCHES=("$SCRIPT_DIR/colloid-skx.patch" "$SCRIPT_DIR/colloid-skx-alto.patch" "$SCRIPT_DIR/../common/colloid-build.patch")
 
 [[ -d "$KERNEL_DIR" ]] || { echo "ERROR: kernel tree not found at $KERNEL_DIR (clone Linux there first)"; exit 1; }
 for p in "${PATCHES[@]}"; do
