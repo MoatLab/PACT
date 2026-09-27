@@ -22,6 +22,8 @@ else
     git apply "$PATCH"
 fi
 
+bash "$SCRIPT_DIR/../common/apply-build-fixes.sh" "$KERNEL_DIR"
+
 # Base the config on the running kernel, then resolve new symbols
 # non-interactively. (Do NOT pipe `yes` into `make oldconfig`: under
 # `set -o pipefail`, `yes` dies with SIGPIPE and aborts the build.)

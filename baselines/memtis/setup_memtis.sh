@@ -53,6 +53,8 @@ patch -p1 --dry-run < "$PATCH_FILE"
 echo "==> Applying memtis.patch..."
 patch -p1 < "$PATCH_FILE"
 echo "    Patch applied successfully."
+git apply "$SCRIPT_DIR/memtis-vmstat.patch"
+bash "$SCRIPT_DIR/../common/apply-build-fixes.sh" "$KERNEL_DIR"
 
 # ---------------------------------------------------------------------------
 # 3. Kernel configuration

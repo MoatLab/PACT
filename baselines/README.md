@@ -35,3 +35,14 @@ Each baseline lives in its own subdirectory with a kernel patch, a
 * These directories ship the kernel patches and build scripts. They do not
   include per-system workload run wrappers; boot the patched kernel and drive
   workloads with your own launcher (PACT's own runner is in [`../`](../)).
+
+## Older-kernel build compatibility
+
+TPP, Nomad and Memtis builds also apply
+[`common/libsubcmd-realloc.patch`](common/libsubcmd-realloc.patch), upstream Linux
+commit `52a9dab6d892763b2a8334a568bd4e2c1a6fde66`. It fixes the host-tool
+`realloc(ptr, 0)` use-after-free diagnosed by GCC 12 and newer. The patch retains
+its upstream authorship and the affected file's GPL-2.0 license. It does not
+change kernel tiering policy. The helper skips the fix when already present
+and stops if neither patch direction applies; it does not suppress compiler
+warnings. NBT and the Linux 6.3 baselines already contain this fix.

@@ -72,3 +72,12 @@ Verify after reboot:
 uname -r
 # expected: 5.15.19-htmm
 ```
+
+## Build corrections
+
+The setup script applies `memtis-vmstat.patch` after the original Memtis patch.
+It makes HTMM counter names independent of memory-balloon support, matching
+the counter enums and allowing builds with `CONFIG_MEMORY_BALLOON=n`. The
+shared host-tool fix described in [`../README.md`](../README.md) also enables
+compilation with newer GCC versions. Neither correction changes placement
+policy. Local compilation does not establish boot or workload performance.
