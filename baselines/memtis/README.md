@@ -81,3 +81,22 @@ the counter enums and allowing builds with `CONFIG_MEMORY_BALLOON=n`. The
 shared host-tool fix described in [`../README.md`](../README.md) also enables
 compilation with newer GCC versions. Neither correction changes placement
 policy. Local compilation does not establish boot or workload performance.
+
+## Page-table allocation failure
+
+The setup script also applies `memtis-pte-allocation.patch`. When page-table
+allocation fails, Memtis now returns `NULL` to the caller without attempting
+metadata initialization through the null pointer. Successful allocations and
+placement policy are unchanged.
+
+From the repository root, run the allocation regression after applying the
+patches to the kernel source:
+
+```sh
+python3 tests/test-memtis-pte-allocation.py baselines/memtis/linux/arch/x86/mm/pgtable.c
+```
+
+The test compiles the actual allocation functions with GCC and UBSan. It checks
+page-table and metadata-allocation failures with HTMM compiled in and out.
+These injected allocator tests do not force allocation failure in a running
+kernel or establish workload performance.

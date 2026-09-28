@@ -54,6 +54,7 @@ echo "==> Applying memtis.patch..."
 patch -p1 < "$PATCH_FILE"
 echo "    Patch applied successfully."
 git apply "$SCRIPT_DIR/memtis-vmstat.patch"
+git apply "$SCRIPT_DIR/memtis-pte-allocation.patch"
 bash "$SCRIPT_DIR/../common/apply-build-fixes.sh" "$KERNEL_DIR"
 
 # ---------------------------------------------------------------------------
