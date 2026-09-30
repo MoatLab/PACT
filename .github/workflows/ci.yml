@@ -27,3 +27,6 @@ jobs:
 
       - name: clang-format check
         run: make -C src check-format CLANG_FORMAT=clang-format-18
+
+      - name: PEBS startup failure regression
+        run: make -C src test-pebs-startup

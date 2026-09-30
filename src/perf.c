@@ -74,7 +74,7 @@ static int count_configured_pebs_cpus(pact_context_t *pact, int nr_cpus)
     return n;
 }
 
-void setup_pact_perf_events(pact_context_t *pact)
+int setup_pact_perf_events(pact_context_t *pact)
 {
     pact_workload_t *wl = pact->workload;
 
@@ -97,6 +97,7 @@ void setup_pact_perf_events(pact_context_t *pact)
     if (configured == 0) {
         log_error("setup_pact_perf_events",
                   "PEBS not set up on any CPU! Check permissions and CPU support.");
+        return -1;
     } else {
         log_info("setup_pact_perf_events", "PEBS set up on %d CPUs", configured);
         log_info("setup_pact_perf_events",
@@ -104,4 +105,5 @@ void setup_pact_perf_events(pact_context_t *pact)
     }
 
     start_pmu_perf_events(pact);
+    return 0;
 }

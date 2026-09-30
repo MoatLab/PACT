@@ -78,3 +78,11 @@ format:
 check-format:
 	$(require_clang_format)
 	$(CLANG_FORMAT) --dry-run -Werror $(FMT_SRCS)
+
+.PHONY: test-pebs-startup
+test-pebs-startup:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-pebs-startup.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

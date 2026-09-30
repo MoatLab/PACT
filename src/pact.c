@@ -1375,7 +1375,10 @@ int main(int argc, char *argv[])
            g_pact->nr_all_cpus);
 
     pact_signal_install_handlers(&g_pact->running);
-    setup_pact_perf_events(g_pact);
+    if (setup_pact_perf_events(g_pact) < 0) {
+        pact_destroy(g_pact);
+        return 1;
+    }
     g_pact->running = true;
 
     printf("=== PACT Runtime Mode: Single-threaded Coroutines ===\n");

@@ -9,8 +9,8 @@
 
 /* Open per-CPU PEBS events, the workload's per-PID-inherit counting group,
  * and the workload's CHAs. Called once during init, after the PEBS
- * aggregator is set up. */
-void setup_pact_perf_events(pact_context_t *pact);
+ * aggregator is set up. Return -1 if no PEBS CPU can be configured. */
+int setup_pact_perf_events(pact_context_t *pact);
 
 /* Zero/sentinel-initialize a single perf_event_t (fd=-1, id=-1, counters=0). */
 void init_perf_event(perf_event_t *perf_event);
