@@ -86,3 +86,7 @@ test-pebs-startup:
 	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
 	    ../tests/test-pebs-startup.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-log-levels
+test-log-levels: all
+	CC="$(CC)" python3 ../tests/test-log-levels.py

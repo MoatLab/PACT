@@ -158,8 +158,8 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
                 return -1;
             }
             int log_level = atoi(argv[i]);
-            if (log_level < 0 || log_level > 3) {
-                fprintf(stderr, "Error: Log level must be between 0 and 3\n");
+            if (log_level < 0 || log_level > 4) {
+                fprintf(stderr, "Error: Log level must be between 0 and 4\n");
                 return -1;
             }
             set_log_level(log_level);

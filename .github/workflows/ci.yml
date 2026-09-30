@@ -30,3 +30,6 @@ jobs:
 
       - name: PEBS startup failure regression
         run: make -C src test-pebs-startup
+
+      - name: Log-level filtering regression
+        run: make -C src test-log-levels

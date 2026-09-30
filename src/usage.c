@@ -91,7 +91,7 @@ void pact_print_usage(const char *prog_name)
     printf("  -l, --logging [FORMAT]            Enable logging (csv | json); "
            "requires a `make logging` build.\n");
     printf("  --log-file PATH                   Log file path.\n");
-    printf("  --log-level LEVEL                 0=error 1=warn 2=info 3=trace "
+    printf("  --log-level LEVEL                 0=error 1=warn 2=info 3=debug 4=trace "
            "(default 2).\n");
     printf("  -h, --help                        Show this help and exit.\n");
     printf("  -V, --version                     Print version and exit.\n");

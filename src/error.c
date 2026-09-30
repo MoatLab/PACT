@@ -23,11 +23,13 @@ static void log_info_impl(const char *function, const char *format, ...);
 static void log_debug_impl(const char *function, const char *format, ...);
 static void log_trace_impl(const char *function, const char *format, ...);
 
+/* Static initializers must match global_log_level (LOG_LEVEL_INFO): debug
+ * and trace stay silent unless --log-level raises the level. */
 void (*log_error_fn)(const char *function, const char *format, ...) = log_error_impl;
 void (*log_warning_fn)(const char *function, const char *format, ...) = log_warning_impl;
 void (*log_info_fn)(const char *function, const char *format, ...) = log_info_impl;
 void (*log_debug_fn)(const char *function, const char *format, ...) = noop_log;
-void (*log_trace_fn)(const char *function, const char *format, ...) = log_trace_impl;
+void (*log_trace_fn)(const char *function, const char *format, ...) = noop_log;
 
 /* Thread-safety contract ():
  *
