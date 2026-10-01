@@ -90,3 +90,18 @@ test-pebs-startup:
 .PHONY: test-log-levels
 test-log-levels: all
 	CC="$(CC)" python3 ../tests/test-log-levels.py
+
+.PHONY: test-sampling-window
+test-sampling-window:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O2 -D_GNU_SOURCE -I. -ffunction-sections -fdata-sections \
+	    ../tests/test-sampling-window.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-thread-coverage
+test-thread-coverage:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. -pthread \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-thread-coverage.c perf.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

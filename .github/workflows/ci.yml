@@ -33,3 +33,9 @@ jobs:
 
       - name: Log-level filtering regression
         run: make -C src test-log-levels
+
+      - name: Sampling deadline regression
+        run: make -C src test-sampling-window
+
+      - name: Thread counter coverage regression
+        run: make -C src test-thread-coverage

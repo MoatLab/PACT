@@ -16,6 +16,8 @@
 #include <linux/perf_event.h>
 #include <assert.h>
 #include <dirent.h>
+#include <limits.h>
+#include <sched.h>
 #include <numa.h>
 #include <numaif.h>
 #include <time.h>
@@ -357,12 +359,28 @@ void start_pmu_perf_events(pact_context_t *ctx)
     pact_workload_t *wl = ctx->workload;
     ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_RESET);
     ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_RESET);
-    if (wl->counting_leader.fd >= 0) {
-        ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP);
+    for (size_t i = 0; i < wl->nr_threads; i++) {
+        if (ioctl(wl->threads[i].leader.fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP) < 0) {
+            ctx->sampling_failed = true;
+            ctx->running = false;
+            log_error("pmu_control", "Failed to control TID %d: %s", wl->threads[i].tid,
+                      strerror(errno));
+        }
+    }
+    if (ctx->sampling_failed) {
+        return;
     }
     ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_ENABLE);
-    if (wl->counting_leader.fd >= 0) {
-        ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP);
+    for (size_t i = 0; i < wl->nr_threads; i++) {
+        if (ioctl(wl->threads[i].leader.fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP) < 0) {
+            ctx->sampling_failed = true;
+            ctx->running = false;
+            log_error("pmu_control", "Failed to control TID %d: %s", wl->threads[i].tid,
+                      strerror(errno));
+        }
+    }
+    if (ctx->sampling_failed) {
+        return;
     }
     ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_ENABLE);
 }
@@ -371,8 +389,13 @@ void stop_pmu_perf_events(pact_context_t *ctx)
 {
     pact_workload_t *wl = ctx->workload;
     ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_DISABLE);
-    if (wl->counting_leader.fd >= 0) {
-        ioctl(wl->counting_leader.fd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP);
+    for (size_t i = 0; i < wl->nr_threads; i++) {
+        if (ioctl(wl->threads[i].leader.fd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP) < 0) {
+            ctx->sampling_failed = true;
+            ctx->running = false;
+            log_error("pmu_control", "Failed to control TID %d: %s", wl->threads[i].tid,
+                      strerror(errno));
+        }
     }
     ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_DISABLE);
 }
@@ -393,24 +416,42 @@ void read_pmu_cha_perf_events(cha_pmu_info_t *cha_pmus, int nr_cha)
  * values[]; unmatched slots are left zeroed. Returns bytes read (>0 on
  * success, 0 on empty, <0 on error). */
 static int read_perf_event_group_raw(int leader_fd, const uint64_t *ids, uint64_t *values, int n,
-                                     uint64_t *out_time_enabled, uint64_t *out_time_running)
+                                     uint64_t *out_time_enabled, uint64_t *out_time_running,
+                                     bool dummy_leader)
 {
-    char buf[4096];
+    _Alignas(read_format_t) char buf[4096];
     read_format_t *rf = (read_format_t *)buf;
     int bytes_read = read(leader_fd, buf, sizeof(buf));
     if (bytes_read <= 0) {
         return bytes_read;
     }
+    if ((size_t)bytes_read < sizeof(*rf) ||
+        rf->nr > (sizeof(buf) - sizeof(*rf)) / sizeof(rf->values[0]) ||
+        sizeof(*rf) + rf->nr * sizeof(rf->values[0]) != (size_t)bytes_read ||
+        rf->nr != (uint64_t)n + dummy_leader) {
+        errno = EIO;
+        return -1;
+    }
     for (int j = 0; j < n; j++) {
         values[j] = 0;
     }
+    unsigned int found = 0;
     for (uint64_t i = 0; i < rf->nr; i++) {
         for (int j = 0; j < n; j++) {
             if (rf->values[i].id == ids[j]) {
+                if (found & (1u << j)) {
+                    errno = EIO;
+                    return -1;
+                }
+                found |= 1u << j;
                 values[j] = rf->values[i].value;
                 break;
             }
         }
+    }
+    if (found != (1u << n) - 1) {
+        errno = EIO;
+        return -1;
     }
     if (out_time_enabled) {
         *out_time_enabled = rf->time_enabled;
@@ -434,7 +475,7 @@ static int read_perf_event_array(perf_event_t *leader, perf_event_t *events, int
         ids[j] = events[j].id;
     }
     int bytes_read = read_perf_event_group_raw(leader->fd, ids, values, n, &leader->time_enabled,
-                                               &leader->time_running);
+                                               &leader->time_running, true);
     if (bytes_read <= 0) {
         return bytes_read;
     }
@@ -444,17 +485,37 @@ static int read_perf_event_array(perf_event_t *leader, perf_event_t *events, int
     return bytes_read;
 }
 
-/* Read the workload's per-PID counting group (single fd, all events in
- * one read). Counts are kernel-aggregated across all threads of the
- * workload via inherit=1. */
+/* Read only covered TIDs. A zero-running or failed group invalidates the
+ * window rather than presenting partial counts as complete measurements. */
 static void read_workload_counting_events(pact_workload_t *wl)
 {
-    int bytes_read =
-        read_perf_event_array(&wl->counting_leader, wl->counting_events, CORE_EVENT_COUNT);
-    if (bytes_read <= 0 && wl->counting_leader.fd >= 0) {
-        log_warning("read_workload_counting_events",
-                    "Failed to read workload PID %d: bytes_read=%d, errno=%s", wl->target_pid,
-                    bytes_read, strerror(errno));
+    wl->stats.llc_misses_fast = 0;
+    wl->stats.llc_misses_slow = 0;
+    wl->counters_valid = wl->nr_threads > 0;
+    for (size_t i = 0; i < wl->nr_threads; i++) {
+        thread_perf_t *t = &wl->threads[i];
+        int n = read_perf_event_array(&t->leader, t->events, CORE_EVENT_COUNT);
+        t->valid = n > 0;
+        if (!t->valid) {
+            wl->counters_valid = false;
+            continue;
+        }
+        uint64_t enabled = t->leader.time_enabled - t->last_enabled;
+        uint64_t running = t->leader.time_running - t->last_running;
+        t->last_enabled = t->leader.time_enabled;
+        t->last_running = t->leader.time_running;
+        if (!running) {
+            t->valid = false;
+            continue;
+        }
+        /* Reject multiplexed windows. Extrapolating unequal thread coverage
+         * can bias attribution even if each raw count is scaled. */
+        if (running != enabled) {
+            wl->counters_valid = false;
+        }
+        wl->stats.time_running += running;
+        wl->stats.llc_misses_fast += t->events[CORE_EVENT_LLC_MISS_FAST].value;
+        wl->stats.llc_misses_slow += t->events[CORE_EVENT_LLC_MISS_SLOW].value;
     }
 }
 
@@ -467,7 +528,7 @@ int setup_dummy_leader_event(perf_event_t *perf_event, pid_t pid, int cpu)
     pe.config = PERF_COUNT_SW_DUMMY;
     pe.size = sizeof(pe);
     pe.disabled = 1; /* ONLY group leader start disabled*/
-    pe.inherit = 1;
+    pe.inherit = 0;
     pe.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING |
                      PERF_FORMAT_GROUP | PERF_FORMAT_ID;
 
@@ -496,7 +557,7 @@ int setup_pebs_event(per_cpu_state_t *cpu_state, pid_t pid, int cpu)
     pe.exclude_idle = 1;
     pe.mmap = 1;
     pe.precise_ip = 2; /* Request PEBS */
-    pe.inherit = 1;
+    pe.inherit = 0;
     pe.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING |
                      PERF_FORMAT_GROUP | PERF_FORMAT_ID;
 
@@ -545,7 +606,7 @@ int setup_counting_event(perf_event_t *perf_event, pid_t pid, int cpu, perf_even
     pe.sample_period = 0;
     pe.exclude_kernel = 1;
     pe.exclude_hv = 1;
-    pe.inherit = 1;
+    pe.inherit = 0;
     pe.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING |
                      PERF_FORMAT_GROUP | PERF_FORMAT_ID;
 
@@ -560,12 +621,18 @@ int setup_counting_event(perf_event_t *perf_event, pid_t pid, int cpu, perf_even
     if (perf_event->fd < 0) {
         log_error("setup_counting_event", "Failed to open counting event config=0x%llx", config);
         perf_event->fd = -1;
-        exit(EXIT_FAILURE);
+        return -1;
     } else {
         log_info("setup_counting_event", "thread [%d] counting event %s (config=0x%llx) fd:%d", pid,
                  name, config, perf_event->fd);
     }
-    ioctl(perf_event->fd, PERF_EVENT_IOC_ID, &perf_event->id);
+    if (ioctl(perf_event->fd, PERF_EVENT_IOC_ID, &perf_event->id) < 0) {
+        int error = errno;
+        close(perf_event->fd);
+        perf_event->fd = -1;
+        errno = error;
+        return -1;
+    }
 
     return 0;
 }
@@ -580,7 +647,7 @@ int read_pmu_event_group(event_group_t *event_group)
     uint64_t te = event_group->time_enabled, tr = event_group->time_running;
     int bytes_read =
         read_perf_event_group_raw(event_group->fds[0], event_group->ids, event_group->values,
-                                  event_group->counters_used, &te, &tr);
+                                  event_group->counters_used, &te, &tr, false);
     if (bytes_read > 0) {
         event_group->last_time_enabled = event_group->time_enabled;
         event_group->last_time_running = event_group->time_running;
@@ -669,58 +736,208 @@ static void calculate_workload_mlp(pact_workload_t *wl)
     }
 }
 
-/* Read the per-PID counting group (single fd with inherit=1, aggregating
- * across all child threads of the workload) and roll up into workload
- * stats. MLP is computed from CHA TOR ratios (Algorithm 1). */
+/* Sum task-local counts only from covered groups; MLP uses CHA TOR ratios. */
 void read_pmu_counting_events(pact_context_t *ctx)
 {
     pact_workload_t *wl = ctx->workload;
 
     read_workload_counting_events(wl);
-    uint64_t wl_fast = wl->counting_events[CORE_EVENT_LLC_MISS_FAST].value;
-    uint64_t wl_slow = wl->counting_events[CORE_EVENT_LLC_MISS_SLOW].value;
-    log_trace("read_pmu_counting_events", "Workload LLC misses fast=%lu, slow=%lu", wl_fast,
-              wl_slow);
-
-    wl->stats.llc_misses_fast = wl_fast;
-    wl->stats.llc_misses_slow = wl_slow;
-    if (wl->counting_leader.fd >= 0) {
-        wl->stats.time_running = wl->counting_leader.time_running - wl->stats.last_time_running;
-        wl->stats.last_time_running = wl->counting_leader.time_running;
-    }
-
     read_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha);
     calculate_workload_mlp(wl);
     log_debug("read_pmu_counting_events", "Workload (PID %d) MLP: fast=%.2f, slow=%.2f",
               wl->target_pid, wl->workload_mlp_fast, wl->workload_mlp_slow);
 }
 
-/* Open one counting group per workload: dummy SW leader + LLC-miss events,
- * all on (pid=target_pid, cpu=-1, inherit=1, mmap=0). Kernel auto-attributes
- * counts across every thread of the workload via inherit. Replaces the
- * per-TID setup that needed /proc/<pid>/task polling. */
-void setup_workload_counting_events(pact_workload_t *wl)
+static void close_thread_events(thread_perf_t *t)
 {
-    init_perf_event(&wl->counting_leader);
-    for (int j = 0; j < CORE_EVENT_COUNT; j++) {
-        init_perf_event(&wl->counting_events[j]);
-    }
-
-    if (setup_dummy_leader_event(&wl->counting_leader, wl->target_pid, -1) < 0) {
-        log_error("setup_workload_counting_events",
-                  "Failed to create counting leader for workload PID %d", wl->target_pid);
-        return;
+    if (t->leader.fd >= 0) {
+        close(t->leader.fd);
     }
     for (int j = 0; j < CORE_EVENT_COUNT; j++) {
-        if (setup_counting_event(&wl->counting_events[j], wl->target_pid, -1, &wl->counting_leader,
-                                 core_event_configs[j].config, core_event_configs[j].name) < 0) {
-            log_error("setup_workload_counting_events",
-                      "Failed to setup %s event for workload PID %d", core_event_configs[j].name,
-                      wl->target_pid);
-            return;
+        if (t->events[j].fd >= 0) {
+            close(t->events[j].fd);
         }
     }
-    log_info("setup_workload_counting_events",
-             "Workload PID %d: per-workload counting events setup (1 fd per event, inherit=1)",
-             wl->target_pid);
+    t->leader.fd = -1;
+}
+
+void cleanup_workload_counting_events(pact_workload_t *wl)
+{
+    for (size_t i = 0; i < wl->nr_threads; i++) {
+        close_thread_events(&wl->threads[i]);
+    }
+    free(wl->threads);
+    wl->threads = NULL;
+    wl->nr_threads = 0;
+}
+
+static int compare_thread_id(const void *a, const void *b)
+{
+    pid_t x = ((const thread_perf_t *)a)->tid, y = ((const thread_perf_t *)b)->tid;
+    return (x > y) - (x < y);
+}
+
+bool workload_covers_tid(const pact_workload_t *wl, pid_t tid)
+{
+    if (!wl->nr_threads) {
+        return false;
+    }
+    thread_perf_t key = {.tid = tid};
+    const thread_perf_t *t =
+        bsearch(&key, wl->threads, wl->nr_threads, sizeof(*wl->threads), compare_thread_id);
+    return t && t->valid;
+}
+
+static int thread_start_time(pid_t pid, pid_t tid, uint64_t *value)
+{
+    char path[96], line[4096];
+    snprintf(path, sizeof(path), "/proc/%d/task/%d/stat", pid, tid);
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        return -1;
+    }
+    bool ok = fgets(line, sizeof(line), fp) != NULL;
+    fclose(fp);
+    char *end = ok ? strrchr(line, ')') : NULL;
+    if (!end) {
+        errno = EIO;
+        return -1;
+    }
+    char *save, *token = strtok_r(end + 1, " ", &save);
+    if (token && (token[0] == 'Z' || token[0] == 'X')) {
+        errno = ESRCH;
+        return -1;
+    }
+    for (int field = 3; token && field < 22; field++) {
+        token = strtok_r(NULL, " ", &save);
+    }
+    if (!token) {
+        errno = EIO;
+        return -1;
+    }
+    *value = strtoull(token, &end, 10);
+    if (*end) {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
+int setup_workload_counting_events(pact_workload_t *wl)
+{
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/task", wl->target_pid);
+    DIR *dir = opendir(path);
+    if (!dir) {
+        return -1;
+    }
+    thread_perf_t *next = NULL;
+    size_t count = 0, capacity = 0;
+    struct dirent *de;
+    int result = 0;
+    while ((de = readdir(dir))) {
+        char *end;
+        long id = strtol(de->d_name, &end, 10);
+        if (*end || id <= 0 || id > INT_MAX) {
+            continue;
+        }
+        thread_perf_t t = {.tid = (pid_t)id, .valid = true};
+        init_perf_event(&t.leader);
+        for (int j = 0; j < CORE_EVENT_COUNT; j++) {
+            init_perf_event(&t.events[j]);
+        }
+        if (thread_start_time(wl->target_pid, id, &t.start_time) < 0) {
+            if (errno == ESRCH || errno == ENOENT) {
+                continue;
+            }
+            result = -1;
+            break;
+        }
+        if (wl->cpu_mask) {
+            cpu_set_t affinity;
+            if (sched_getaffinity(id, sizeof(affinity), &affinity) < 0) {
+                if (errno == ESRCH) {
+                    continue;
+                }
+                result = -1;
+                break;
+            }
+            bool covered = true;
+            for (int cpu = 0; cpu < CPU_SETSIZE; cpu++) {
+                if (CPU_ISSET(cpu, &affinity) && (cpu >= 64 || !(wl->cpu_mask & (1ULL << cpu)))) {
+                    covered = false;
+                }
+            }
+            if (!covered) {
+                log_error("setup_workload_counting_events", "TID %ld left the sampled CPU affinity",
+                          id);
+                errno = EINVAL;
+                result = -1;
+                break;
+            }
+        }
+        thread_perf_t *old_entry = wl->nr_threads ? bsearch(&t, wl->threads, wl->nr_threads,
+                                                            sizeof(*wl->threads), compare_thread_id)
+                                                  : NULL;
+        size_t old = old_entry && old_entry->start_time == t.start_time
+                         ? (size_t)(old_entry - wl->threads)
+                         : wl->nr_threads;
+        if (old < wl->nr_threads) {
+            t = wl->threads[old];
+        } else {
+            if (setup_dummy_leader_event(&t.leader, id, -1) < 0) {
+                if (errno == ESRCH || errno == ENOENT) {
+                    continue;
+                }
+                result = -1;
+                break;
+            }
+            bool failed = false;
+            for (int j = 0; j < CORE_EVENT_COUNT; j++) {
+                if (setup_counting_event(&t.events[j], id, -1, &t.leader,
+                                         core_event_configs[j].config,
+                                         core_event_configs[j].name) < 0) {
+                    failed = true;
+                    break;
+                }
+            }
+            if (failed) {
+                int error = errno;
+                close_thread_events(&t);
+                if (error == ESRCH || error == ENOENT) {
+                    continue;
+                }
+                result = -1;
+                break;
+            }
+        }
+        if (count == capacity) {
+            size_t new_capacity = capacity ? capacity * 2 : 16;
+            thread_perf_t *grown = realloc(next, new_capacity * sizeof(*next));
+            if (!grown) {
+                if (old == wl->nr_threads) {
+                    close_thread_events(&t);
+                }
+                result = -1;
+                break;
+            }
+            next = grown;
+            capacity = new_capacity;
+        }
+        next[count++] = t;
+        if (old < wl->nr_threads) {
+            wl->threads[old].leader.fd = -1;
+            for (int j = 0; j < CORE_EVENT_COUNT; j++) {
+                wl->threads[old].events[j].fd = -1;
+            }
+        }
+    }
+    closedir(dir);
+    cleanup_workload_counting_events(wl);
+    wl->threads = next;
+    wl->nr_threads = count;
+    if (count) {
+        qsort(next, count, sizeof(*next), compare_thread_id);
+    }
+    return count ? result : -1;
 }

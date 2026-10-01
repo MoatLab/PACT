@@ -16,7 +16,7 @@
 static void print_basic_stats(pact_context_t *pact)
 {
     printf("\n=== PACT Statistics ===\n");
-    printf("Time running: %lu cycles\n", pact->workload->stats.time_running);
+    printf("Counter running time (summed task ns): %lu\n", pact->workload->stats.time_running);
     printf("LLC Misses (fast): %lu\n", pact->workload->stats.llc_misses_fast);
     printf("LLC Misses (slow): %lu\n", pact->workload->stats.llc_misses_slow);
     printf("PAC Updates: %lu\n", pact->workload->stats.pac_updates);

@@ -22,12 +22,11 @@
 #include "pebs-aggregator.h"
 #include "logging.h"
 #include "minicoro.h"
+#include "tsc.h"
 
 #ifndef PAGE_SIZE
 #define PAGE_SIZE sysconf(_SC_PAGESIZE)
 #endif
-
-extern uint64_t rdtsc(void);
 
 /* PEBS Aggregator Context */
 typedef struct pebs_aggregator {
@@ -190,7 +189,9 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
             } rec;
             if (hdr.size >= sizeof(rec)) {
                 ring_copy(&rec, data, off, sizeof(rec), data_size);
-                if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid)) {
+                if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid) &&
+                    agg->pact_ctx->workload->counters_valid &&
+                    workload_covers_tid(agg->pact_ctx->workload, (pid_t)rec.tid)) {
                     events[count++] = PEBS_ENCODE_ADDR_TIER(rec.addr, 1);
                     agg->events_per_tier[1]++;
                 }
@@ -351,9 +352,7 @@ static void reset_per_cycle_counters(pebs_aggregator_t *agg)
     agg->lost_events = 0;
 }
 
-/* Periodic check for workload exit. With per-PID inherit counting events
- * the kernel auto-tracks child threads, so a liveness probe on the
- * workload's TGID suffices. Polled every ~5s of PEBS cycles. */
+/* Check workload liveness independently of per-window thread discovery. */
 static bool poll_and_update_threads(pact_context_t *ctx, int debug_counter)
 {
     if ((debug_counter % 250) != 0) {
@@ -412,6 +411,9 @@ void pebs_aggregator_coroutine(mco_coro *co)
 
         /* turn off pmu counters */
         stop_pmu_perf_events(ctx);
+        if (ctx->sampling_failed) {
+            break;
+        }
 
         /* read counting events, e.g. LLC stalls, CHA stats */
         read_pmu_counting_events(ctx);
@@ -423,11 +425,21 @@ void pebs_aggregator_coroutine(mco_coro *co)
             break;
         }
 
-        /* reset and turn back on pmu counters before aggregation to minimize dead time */
-        start_pmu_perf_events(ctx);
-
-        /* Drain, attribute (same-window), and publish this window's samples */
+        /* Keep the old task population and counters stopped until its samples
+         * have been attributed. Newly created tasks join the next window. */
         int aggregated = pebs_aggregate_events(agg, ctx);
+        if (setup_workload_counting_events(ctx->workload) < 0) {
+            if (kill(ctx->workload->target_pid, 0) < 0 && errno == ESRCH) {
+                ctx->running = false;
+                break;
+            }
+            log_error("pebs_aggregator_coroutine", "Failed to refresh task counter coverage");
+            ctx->sampling_failed = true;
+            ctx->running = false;
+            break;
+        }
+        start_pmu_perf_events(ctx);
+        ctx->timing[CORO_TYPE_PEBS].next_tsc = rdtsc() + ms_to_tsc(ctx, ctx->sampling_interval_ms);
 
         /* Accumulate per-workload PEBS samples into cumulative counter */
         ctx->workload->total_pebs_samples += agg->events_per_tier[0] + agg->events_per_tier[1];

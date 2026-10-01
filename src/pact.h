@@ -167,8 +167,7 @@ typedef struct {
     uint64_t new_demotions;
 
     /* PAC and memory access statistics */
-    uint64_t last_time_running;
-    uint64_t time_running;
+    uint64_t time_running; /* Sum of per-task counter running nanoseconds. */
     uint64_t llc_misses_fast;
     uint64_t llc_misses_slow;
     uint64_t pac_updates;
@@ -232,12 +231,10 @@ typedef struct pact_workload {
     int nr_target_cpus; /* Number of CPUs */
     uint64_t cpu_mask;  /* Bitmask of CPUs (for quick checks) */
 
-    /* Per-workload counting events (LLC misses). Single fd per event opened
-     * with pid=target_pid, cpu=-1, inherit=1, mmap=0 — kernel auto-attributes
-     * across all threads of the workload. Replaces the per-TID setup that
-     * required /proc/<pid>/task polling. */
-    perf_event_t counting_leader;
-    perf_event_t counting_events[CORE_EVENT_COUNT];
+    /* Non-inheriting groups for each observed task, refreshed between windows. */
+    thread_perf_t *threads;
+    size_t nr_threads;
+    bool counters_valid;
 
     /* Per-workload CHA PMUs for MLP measurement */
     cha_pmu_info_t cha_pmus[MAX_CHAS]; /* CHA PMU configurations */
@@ -349,6 +346,7 @@ struct pact_context {
 
     /* ===== Control Flags ===== */
     volatile bool running;
+    bool sampling_failed;
 
     /* ===== Coroutine scheduling state ===== */
 

@@ -1037,12 +1037,7 @@ static void destroy_per_workload_perf(pact_context_t *pact)
         return;
     }
     pact_workload_t *wl = pact->workload;
-    safe_close(wl->counting_leader.fd, "pact_destroy");
-    wl->counting_leader.fd = -1;
-    for (int j = 0; j < CORE_EVENT_COUNT; j++) {
-        safe_close(wl->counting_events[j].fd, "pact_destroy");
-        wl->counting_events[j].fd = -1;
-    }
+    cleanup_workload_counting_events(wl);
     free(wl->target_cpus);
     wl->target_cpus = NULL;
 }
@@ -1184,10 +1179,6 @@ static int init_workload(pact_workload_t *wl, const pact_config_t *config, int m
     wl->reservoir = reservoir_create(RESERVOIR_SIZE);
     wl->binning = safe_calloc(1, sizeof(binning_state_t), "wl->binning");
 
-    init_perf_event(&wl->counting_leader);
-    for (int j = 0; j < CORE_EVENT_COUNT; j++) {
-        init_perf_event(&wl->counting_events[j]);
-    }
     wl->nr_cha = 0;
 
     printf("Initialized workload: PID %d, name '%s' (%d CPUs)\n", wl->target_pid, wl->name,
@@ -1379,7 +1370,7 @@ int main(int argc, char *argv[])
         pact_destroy(g_pact);
         return 1;
     }
-    g_pact->running = true;
+    g_pact->running = !g_pact->sampling_failed;
 
     printf("=== PACT Runtime Mode: Single-threaded Coroutines ===\n");
     printf("Architecture: Lock-free, event-driven, cooperative multitasking\n\n");
@@ -1392,6 +1383,7 @@ int main(int argc, char *argv[])
     printf("✓ Coroutines stopped gracefully\n");
 
     printf("Cleaning up PACT resources...\n");
+    bool sampling_failed = g_pact->sampling_failed;
     pact_destroy(g_pact);
 
     int sig = pact_signal_received();
@@ -1401,6 +1393,9 @@ int main(int argc, char *argv[])
         printf("PACT shutdown complete.\n");
     }
 
+    if (sampling_failed) {
+        return 1;
+    }
     pact_signal_write_clean_marker(sig);
     return 0;
 }

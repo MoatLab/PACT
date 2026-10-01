@@ -89,9 +89,11 @@ int setup_pact_perf_events(pact_context_t *pact)
         setup_one_cpu_perf(cpu_state, /*skip=*/false);
     }
 
-    /* Per-workload counting (single per-PID inherit fd per event) — kernel
-     * attributes LLC misses across all child threads of the workload. */
-    setup_workload_counting_events(wl);
+    if (setup_workload_counting_events(wl) < 0) {
+        log_error("setup_pact_perf_events", "Failed to cover workload threads");
+        pact->sampling_failed = true;
+        return -1;
+    }
 
     int configured = count_configured_pebs_cpus(pact, pact->nr_all_cpus);
     if (configured == 0) {
@@ -105,5 +107,5 @@ int setup_pact_perf_events(pact_context_t *pact)
     }
 
     start_pmu_perf_events(pact);
-    return 0;
+    return pact->sampling_failed ? -1 : 0;
 }

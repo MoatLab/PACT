@@ -35,9 +35,10 @@ int setup_pebs_event(per_cpu_state_t *cpu, pid_t pid, int id)
     cpu->pebs_mmap = cpu;
     return 0;
 }
-void setup_workload_counting_events(pact_workload_t *wl)
+int setup_workload_counting_events(pact_workload_t *wl)
 {
     (void)wl;
+    return 0;
 }
 void start_pmu_perf_events(pact_context_t *ctx)
 {

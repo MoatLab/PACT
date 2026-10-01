@@ -83,7 +83,17 @@ typedef struct perf_event {
     uint64_t time_running;
 } perf_event_t;
 
-/*  Per-CPU sampling state */
+/* Per-task counter ownership, refreshed between sampling windows. */
+typedef struct thread_perf {
+    pid_t tid;
+    uint64_t start_time; /* /proc start ticks disambiguate reused TIDs. */
+    perf_event_t leader;
+    perf_event_t events[CORE_EVENT_COUNT];
+    uint64_t last_enabled, last_running;
+    bool valid;
+} thread_perf_t;
+
+/* Per-CPU sampling state. */
 typedef struct per_cpu_state {
     int cpu_id;
 
@@ -121,10 +131,11 @@ void scale_multiplexed_events(event_group_t *event_group);
 
 void read_pmu_counting_events(pact_context_t *ctx);
 
-/* Open per-workload counting events (LLC misses) with pid=target_pid,
- * cpu=-1, inherit=1, mmap=0. Single fd per event; the kernel attributes
- * across all child threads automatically. */
+/* Refresh per-task non-inheriting groups while counters are stopped. Keep
+ * existing descriptors, add new tasks, and close exited/reused task groups. */
 struct pact_workload;
-void setup_workload_counting_events(struct pact_workload *wl);
+int setup_workload_counting_events(struct pact_workload *wl);
+void cleanup_workload_counting_events(struct pact_workload *wl);
+bool workload_covers_tid(const struct pact_workload *wl, pid_t tid);
 
 #endif

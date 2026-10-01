@@ -7,7 +7,7 @@
 
 #include "pact.h"
 
-/* Open per-CPU PEBS events, the workload's per-PID-inherit counting group,
+/* Open per-CPU PEBS events, the workload's per-task counting groups,
  * and the workload's CHAs. Called once during init, after the PEBS
  * aggregator is set up. Return -1 if no PEBS CPU can be configured. */
 int setup_pact_perf_events(pact_context_t *pact);
