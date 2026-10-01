@@ -7,7 +7,7 @@
 
 #include <errno.h>
 #include <sched.h>
-#include <signal.h> /* kill */
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,17 +48,15 @@ int pact_pin_to_cpu(int cpu)
 
 bool pact_check_all_targets_exited(pact_context_t *ctx)
 {
-    pid_t pid = ctx->workload->target_pid;
-    if (pid <= 0) {
-        return true;
-    }
-    /* kill(pid, 0) probes process existence without sending a signal.
-     * EPERM = process exists but we cannot signal it — treat as alive. */
-    if (kill(pid, 0) == 0) {
+    if (ctx->target_pidfd < 0) {
         return false;
     }
-    if (errno == EPERM) {
-        return false;
+    struct pollfd target = {.fd = ctx->target_pidfd, .events = POLLIN};
+    int result = poll(&target, 1, 0);
+    if ((result < 0 && errno != EINTR) || (target.revents & POLLNVAL)) {
+        log_error("pact_check_all_targets_exited", "Cannot query workload pidfd");
+        ctx->sampling_failed = true;
+        ctx->running = false;
     }
-    return true;
+    return result > 0 && (target.revents & (POLLIN | POLLHUP));
 }

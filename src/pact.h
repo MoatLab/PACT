@@ -347,6 +347,7 @@ struct pact_context {
     /* ===== Control Flags ===== */
     volatile bool running;
     bool sampling_failed;
+    int target_pidfd; /* Stable workload identity and exit readiness. */
 
     /* ===== Coroutine scheduling state ===== */
 

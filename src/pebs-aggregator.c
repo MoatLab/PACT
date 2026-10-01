@@ -23,6 +23,7 @@
 #include "logging.h"
 #include "minicoro.h"
 #include "tsc.h"
+#include "utils.h"
 
 #ifndef PAGE_SIZE
 #define PAGE_SIZE sysconf(_SC_PAGESIZE)
@@ -355,23 +356,8 @@ static void reset_per_cycle_counters(pebs_aggregator_t *agg)
 /* Check workload liveness independently of per-window thread discovery. */
 static bool poll_and_update_threads(pact_context_t *ctx, int debug_counter)
 {
-    if ((debug_counter % 250) != 0) {
-        return false;
-    }
-    pact_workload_t *wl = ctx->workload;
-    if (wl->target_pid <= 0) {
-        return true; /* already marked exited */
-    }
-    if (kill(wl->target_pid, 0) == 0) {
-        return false;
-    }
-    if (errno == ESRCH) {
-        log_info("poll_and_update_threads", "Workload (PID %d) has exited", wl->target_pid);
-        wl->target_pid = -1;
-        return true;
-    }
-    /* EPERM or other: treat as alive to avoid premature shutdown */
-    return false;
+    (void)debug_counter;
+    return pact_check_all_targets_exited(ctx);
 }
 
 static void log_workload_pebs_stats(pact_context_t *ctx, pebs_aggregator_t *agg)
@@ -429,7 +415,7 @@ void pebs_aggregator_coroutine(mco_coro *co)
          * have been attributed. Newly created tasks join the next window. */
         int aggregated = pebs_aggregate_events(agg, ctx);
         if (setup_workload_counting_events(ctx->workload) < 0) {
-            if (kill(ctx->workload->target_pid, 0) < 0 && errno == ESRCH) {
+            if (pact_check_all_targets_exited(ctx)) {
                 ctx->running = false;
                 break;
             }

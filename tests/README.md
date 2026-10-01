@@ -25,3 +25,7 @@ ASan/UBSan. Hardware counter accuracy and performance require native tests.
 
 The sampling-window test also requires the old PEBS ring to be drained before
 counter restart, so newly covered threads cannot enter the previous window.
+
+`make -C src test-workload-exit` creates a real child and checks exit before
+reaping it. A pidfd must report termination while `kill(pid, 0)` still succeeds.
+The sampling-window test covers exit becoming visible during counter refresh.

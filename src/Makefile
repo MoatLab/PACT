@@ -105,3 +105,10 @@ test-thread-coverage:
 	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
 	    ../tests/test-thread-coverage.c perf.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-workload-exit
+test-workload-exit:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O2 -D_GNU_SOURCE -I. -ffunction-sections -fdata-sections \
+	    ../tests/test-workload-exit.c utils.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

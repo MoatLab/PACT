@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <numa.h>
 #include <numaif.h>
 #include "constants.h"
@@ -1091,6 +1092,7 @@ void pact_destroy(pact_context_t *pact)
         pool_destroy(pact->pac_metadata_pool);
     }
 
+    safe_close(pact->target_pidfd, "pact_destroy");
     free(pact);
 }
 
@@ -1287,6 +1289,7 @@ static void init_migration_and_optimizations(pact_context_t *pact, const pact_co
 
 static int initialize_pact_context(pact_context_t *pact, const pact_config_t *config)
 {
+    pact->target_pidfd = -1;
     pact->pebs_sampling_period = config->pebs_period;
     if (initialize_workloads(pact, config) != 0) {
         return -1;
@@ -1365,6 +1368,12 @@ int main(int argc, char *argv[])
     printf("PACT initialized for workload PID %d across %d CPUs\n", g_pact->workload->target_pid,
            g_pact->nr_all_cpus);
 
+    g_pact->target_pidfd = syscall(SYS_pidfd_open, g_pact->workload->target_pid, 0);
+    if (g_pact->target_pidfd < 0) {
+        log_error("main", "Cannot open workload pidfd: %s", strerror(errno));
+        pact_destroy(g_pact);
+        return 1;
+    }
     pact_signal_install_handlers(&g_pact->running);
     if (setup_pact_perf_events(g_pact) < 0) {
         pact_destroy(g_pact);

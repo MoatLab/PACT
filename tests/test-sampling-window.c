@@ -5,6 +5,7 @@
 #include <assert.h>
 static pact_context_t *active;
 static uint64_t restarted;
+static bool exit_after_refresh, target_exited;
 static struct perf_event_mmap_page *sample_ring;
 void *mco_get_user_data(mco_coro *co)
 {
@@ -40,6 +41,11 @@ void start_pmu_perf_events(pact_context_t *ctx)
 int setup_workload_counting_events(pact_workload_t *wl)
 {
     (void)wl;
+    if (exit_after_refresh) {
+        target_exited = true;
+        errno = ESRCH;
+        return -1;
+    }
     return 0;
 }
 #endif
@@ -48,6 +54,11 @@ bool workload_covers_tid(const pact_workload_t *wl, pid_t tid)
     (void)wl;
     (void)tid;
     return true;
+}
+bool pact_check_all_targets_exited(pact_context_t *ctx)
+{
+    (void)ctx;
+    return target_exited;
 }
 int main(void)
 {
@@ -78,6 +89,14 @@ int main(void)
     printf("expired_deadline=%lu restart=%lu required_interval=%lu\n",
            ctx.timing[CORO_TYPE_PEBS].next_tsc, restarted, ms_to_tsc(&ctx, 10));
     assert(ctx.timing[CORO_TYPE_PEBS].next_tsc >= restarted + ms_to_tsc(&ctx, 10));
+#ifndef PUBLIC_BASELINE
+    /* Exit can become visible between the first check and task refresh. */
+    exit_after_refresh = true;
+    restarted = 0;
+    ctx.running = true;
+    pebs_aggregator_coroutine(NULL);
+    assert(!ctx.running && !ctx.sampling_failed && restarted == 0);
+#endif
     pebs_aggregator_destroy(agg);
     ring_buffer_uint64_destroy(ctx.pac_update_ring);
     free(cpu.pebs_mmap);
