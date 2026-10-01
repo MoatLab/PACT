@@ -60,3 +60,6 @@ jobs:
 
       - name: PAC distribution arithmetic regression
         run: make -C src test-pac-stats
+
+      - name: PAC threshold diagnostic regression
+        run: make -C src test-pac-threshold

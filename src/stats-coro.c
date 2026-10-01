@@ -42,7 +42,7 @@ static void log_one_workload_pac_dist(pact_workload_t *wl)
         return;
     }
 
-    uint64_t threshold = (uint64_t)(wl->binning->bin_width * (wl->binning->bin_count - 1));
+    double threshold = wl->binning->bin_width * (wl->binning->bin_count - 1);
     uint64_t pac_min = UINT64_MAX, pac_max = 0;
     /* Up to uint32_t entries contribute uint64_t scores. Keep the sum wide
      * so the reported average remains between the sampled minimum/maximum. */
@@ -79,7 +79,11 @@ static void log_one_workload_pac_dist(pact_workload_t *wl)
             n_slow++;
             pac_slow_sum += pv;
         }
-        if (pv >= threshold) {
+        /* Match the runtime's bin-index decision, including fractional widths.
+         * Keep the displayed threshold floating-point: accepted widths may
+         * produce a threshold beyond uint64_t without admitting any page. */
+        if (!(wl->binning->bin_width > 0) ||
+            (double)pv / wl->binning->bin_width >= (double)(wl->binning->bin_count - 1)) {
             n_above_threshold++;
         }
     }
@@ -88,7 +92,7 @@ static void log_one_workload_pac_dist(pact_workload_t *wl)
         return;
     }
     log_info("stats_coroutine",
-             "  WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%lu above_thresh=%u "
+             "  WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%.17g above_thresh=%u "
              "fast(n=%u avg=%lu) slow(n=%u avg=%lu)",
              n_total, pac_min, (uint64_t)(pac_sum / n_total), pac_max, threshold, n_above_threshold,
              n_fast, n_fast > 0 ? (uint64_t)(pac_fast_sum / n_fast) : 0, n_slow,

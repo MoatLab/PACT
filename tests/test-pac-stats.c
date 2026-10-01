@@ -35,9 +35,10 @@ int main(void)
     }
     log_one_workload_pac_dist(&wl);
     unsigned int n, above, fast_n, slow_n;
-    uint64_t minimum, average, maximum, threshold, fast_average, slow_average;
+    uint64_t minimum, average, maximum, fast_average, slow_average;
+    double threshold;
     assert(sscanf(captured,
-                  " WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%lu above_thresh=%u "
+                  " WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%lf above_thresh=%u "
                   "fast(n=%u avg=%lu) slow(n=%u avg=%lu)",
                   &n, &minimum, &average, &maximum, &threshold, &above, &fast_n, &fast_average,
                   &slow_n, &slow_average) == 10);
@@ -53,7 +54,7 @@ int main(void)
         }
         log_one_workload_pac_dist(&wl);
         assert(sscanf(captured,
-                      " WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%lu above_thresh=%u "
+                      " WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%lf above_thresh=%u "
                       "fast(n=%u avg=%lu) slow(n=%u avg=%lu)",
                       &n, &minimum, &average, &maximum, &threshold, &above, &fast_n, &fast_average,
                       &slow_n, &slow_average) == 10);

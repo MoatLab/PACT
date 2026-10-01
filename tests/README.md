@@ -63,3 +63,10 @@ measures local CPU time only; application performance needs native experiments.
 parses emitted total/per-tier averages for scores near UINT64_MAX. The
 accumulators must not wrap, and an empty table must not emit a distribution.
 This checks telemetry arithmetic, not workload performance.
+
+`make -C src test-pac-threshold` compares the actual histogram count with
+promotion-queue admission for fractional, ordinary, and very large accepted
+bin widths. It checks float-cast overflow under ASan/UBSan. The `PAC_DIST`
+`threshold` field is a floating-point value and may use scientific notation or
+`inf`; consumers should parse it as a floating-point number. These diagnostic
+checks do not establish an application performance improvement.
