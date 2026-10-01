@@ -152,3 +152,11 @@ test-binning:
 	$(CC) -D_GNU_SOURCE -I. -O1 -g -fsanitize=address,undefined \
 	    -ffunction-sections -fdata-sections ../tests/test-binning.c binning.c \
 	    -Wl,--gc-sections -lm -o "$$test_bin"; "$$test_bin"
+
+.PHONY: test-pac-stats
+test-pac-stats:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined,float-cast-overflow -ffunction-sections -fdata-sections \
+	    ../tests/test-pac-stats.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

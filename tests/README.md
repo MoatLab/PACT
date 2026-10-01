@@ -58,3 +58,8 @@ independent full-sort oracle for repeated, ordered, reverse-ordered and random
 scores, including the production reservoir size of 100. It also checks input
 preservation under ASan/UBSan. Optional `--bench` output from the test binary
 measures local CPU time only; application performance needs native experiments.
+
+`make -C src test-pac-stats` exercises the actual distribution logger and
+parses emitted total/per-tier averages for scores near UINT64_MAX. The
+accumulators must not wrap, and an empty table must not emit a distribution.
+This checks telemetry arithmetic, not workload performance.

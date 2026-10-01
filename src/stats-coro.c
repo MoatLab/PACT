@@ -43,8 +43,10 @@ static void log_one_workload_pac_dist(pact_workload_t *wl)
     }
 
     uint64_t threshold = (uint64_t)(wl->binning->bin_width * (wl->binning->bin_count - 1));
-    uint64_t pac_min = UINT64_MAX, pac_max = 0, pac_sum = 0;
-    uint64_t pac_fast_sum = 0, pac_slow_sum = 0;
+    uint64_t pac_min = UINT64_MAX, pac_max = 0;
+    /* Up to uint32_t entries contribute uint64_t scores. Keep the sum wide
+     * so the reported average remains between the sampled minimum/maximum. */
+    __uint128_t pac_sum = 0, pac_fast_sum = 0, pac_slow_sum = 0;
     uint32_t n_total = 0, n_fast = 0, n_slow = 0, n_above_threshold = 0;
     uint32_t step = (table_size > 10000) ? table_size / 10000 : 1;
     uint32_t count = 0;
@@ -88,9 +90,9 @@ static void log_one_workload_pac_dist(pact_workload_t *wl)
     log_info("stats_coroutine",
              "  WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%lu above_thresh=%u "
              "fast(n=%u avg=%lu) slow(n=%u avg=%lu)",
-             n_total, pac_min, pac_sum / n_total, pac_max, threshold, n_above_threshold, n_fast,
-             n_fast > 0 ? pac_fast_sum / n_fast : 0, n_slow,
-             n_slow > 0 ? pac_slow_sum / n_slow : 0);
+             n_total, pac_min, (uint64_t)(pac_sum / n_total), pac_max, threshold, n_above_threshold,
+             n_fast, n_fast > 0 ? (uint64_t)(pac_fast_sum / n_fast) : 0, n_slow,
+             n_slow > 0 ? (uint64_t)(pac_slow_sum / n_slow) : 0);
 }
 
 static void log_pac_telemetry(pact_context_t *ctx)

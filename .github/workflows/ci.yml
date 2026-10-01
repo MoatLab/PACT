@@ -57,3 +57,6 @@ jobs:
 
       - name: Quartile selection regression
         run: make -C src test-binning
+
+      - name: PAC distribution arithmetic regression
+        run: make -C src test-pac-stats
