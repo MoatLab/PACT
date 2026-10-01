@@ -527,6 +527,8 @@ int setup_dummy_leader_event(perf_event_t *perf_event, pid_t pid, int cpu)
     pe.type = PERF_TYPE_SOFTWARE;
     pe.config = PERF_COUNT_SW_DUMMY;
     pe.size = sizeof(pe);
+    pe.use_clockid = 1;
+    pe.clockid = CLOCK_MONOTONIC;
     pe.disabled = 1; /* ONLY group leader start disabled*/
     pe.inherit = 0;
     pe.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING |
@@ -551,7 +553,9 @@ int setup_pebs_event(per_cpu_state_t *cpu_state, pid_t pid, int cpu)
     pe.type = PERF_TYPE_RAW;
     pe.size = sizeof(pe);
     pe.sample_period = cpu_state->pebs_sampling_period;
-    pe.sample_type = PERF_SAMPLE_ADDR | PERF_SAMPLE_TID;
+    pe.sample_type = PERF_SAMPLE_ADDR | PERF_SAMPLE_TID | PERF_SAMPLE_TIME;
+    pe.use_clockid = 1;
+    pe.clockid = CLOCK_MONOTONIC;
     pe.exclude_kernel = 1;
     pe.exclude_hv = 1;
     pe.exclude_idle = 1;
@@ -601,6 +605,8 @@ int setup_counting_event(perf_event_t *perf_event, pid_t pid, int cpu, perf_even
     memset(&pe, 0, sizeof(pe));
     pe.type = PERF_TYPE_RAW;
     pe.size = sizeof(pe);
+    pe.use_clockid = 1;
+    pe.clockid = CLOCK_MONOTONIC;
     pe.config = config;                      /* event config */
     pe.sample_type = PERF_SAMPLE_IDENTIFIER; /* key for counting mode */
     pe.sample_period = 0;

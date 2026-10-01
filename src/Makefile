@@ -112,3 +112,11 @@ test-workload-exit:
 	$(CC) -Wall -Wextra -O2 -D_GNU_SOURCE -I. -ffunction-sections -fdata-sections \
 	    ../tests/test-workload-exit.c utils.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-pebs-quality
+test-pebs-quality:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-pebs-quality.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

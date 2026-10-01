@@ -164,38 +164,88 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
      * end of the buffer. Reassemble each record into a small linear scratch
      * buffer before reading its fields, so a wrapping record is handled
      * correctly instead of reading past the mapping. Our records are tiny
-     * (header + TID + ADDR), so a fixed scratch is sufficient.
+     * (header + TID + TIME + ADDR), so a fixed scratch is sufficient.
      */
+    pact_stats_t *quality = &agg->pact_ctx->workload->stats;
+    if (head - tail > data_size) {
+        quality->pebs_overruns++;
+        __sync_synchronize();
+        perf_page->data_tail = head;
+        return 0;
+    }
     int count = 0;
-    while (tail < head && count < max_events) {
+    while (head != tail && count < max_events) {
+        if (head - tail < sizeof(struct perf_event_header)) {
+            quality->pebs_malformed++;
+            tail = head;
+            break;
+        }
         uint64_t off = tail % data_size;
 
         struct perf_event_header hdr;
         ring_copy(&hdr, data, off, sizeof(hdr), data_size);
-        if (hdr.size < sizeof(hdr)) {
-            break; /* malformed/zero-size header: stop to avoid an infinite loop */
+        if (hdr.size < sizeof(hdr) || hdr.size > head - tail || hdr.size > data_size) {
+            quality->pebs_malformed++;
+            tail = head;
+            break;
         }
 
         if (hdr.type == PERF_RECORD_SAMPLE) {
             /*
              * Sample layout (ordered by sample_type bit position):
              *   PERF_SAMPLE_TID:      { u32 pid, tid; }
+             *   PERF_SAMPLE_TIME:     { u64 time; }
              *   PERF_SAMPLE_ADDR:     { u64 addr; }
              */
             struct {
                 struct perf_event_header header;
                 uint32_t pid;
                 uint32_t tid;
+                uint64_t time;
                 uint64_t addr;
             } rec;
             if (hdr.size >= sizeof(rec)) {
                 ring_copy(&rec, data, off, sizeof(rec), data_size);
-                if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid) &&
-                    agg->pact_ctx->workload->counters_valid &&
-                    workload_covers_tid(agg->pact_ctx->workload, (pid_t)rec.tid)) {
-                    events[count++] = PEBS_ENCODE_ADDR_TIER(rec.addr, 1);
-                    agg->events_per_tier[1]++;
+                if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid)) {
+                    if (agg->pact_ctx->workload->counters_valid &&
+                        workload_covers_tid(agg->pact_ctx->workload, (pid_t)rec.tid)) {
+                        events[count++] = PEBS_ENCODE_ADDR_TIER(rec.addr, 1);
+                        agg->events_per_tier[1]++;
+                    } else {
+                        quality->pebs_uncovered++;
+                    }
                 }
+            } else {
+                quality->pebs_malformed++;
+            }
+        } else if (hdr.type == PERF_RECORD_LOST) {
+            struct {
+                struct perf_event_header header;
+                uint64_t id, lost;
+            } rec;
+            if (hdr.size >= sizeof(rec)) {
+                ring_copy(&rec, data, off, sizeof(rec), data_size);
+                quality->pebs_lost_records++;
+                quality->pebs_lost_samples += rec.lost;
+            } else {
+                quality->pebs_malformed++;
+            }
+        } else if (hdr.type == PERF_RECORD_LOST_SAMPLES) {
+            struct {
+                struct perf_event_header header;
+                uint64_t lost;
+            } rec;
+            if (hdr.size >= sizeof(rec)) {
+                ring_copy(&rec, data, off, sizeof(rec), data_size);
+                quality->pebs_lost_records++;
+                quality->pebs_lost_samples += rec.lost;
+            } else {
+                quality->pebs_malformed++;
+            }
+        } else if (hdr.type == PERF_RECORD_THROTTLE) {
+            quality->pebs_throttles++;
+            if (hdr.size < sizeof(hdr) + 3 * sizeof(uint64_t)) {
+                quality->pebs_malformed++;
             }
         }
 
@@ -300,6 +350,7 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
             while ((dropped = read_cpu_pebs_events(agg, cpu_state, scratch, 512)) > 0) {
                 agg->read_events_from_perf += dropped;
                 agg->dropped_events_update_full += dropped;
+                ctx->workload->stats.pebs_update_drops += dropped;
                 agg->dropped_events_workload += dropped;
             }
         }
@@ -326,6 +377,7 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
             /* Ring full; the adaptive coroutine drains it on this same
              * thread, so nothing frees up mid-loop. Drop the rest. */
             agg->dropped_events_update_full += (uint64_t)(n - i);
+            ctx->workload->stats.pebs_update_drops += (uint64_t)(n - i);
             break;
         }
         pac_count++;

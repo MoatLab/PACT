@@ -42,3 +42,6 @@ jobs:
 
       - name: Workload exit regression
         run: make -C src test-workload-exit
+
+      - name: PEBS quality accounting regression
+        run: make -C src test-pebs-quality

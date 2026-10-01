@@ -38,6 +38,7 @@ long fake_perf_syscall(long number, ...)
     int cpu = va_arg(args, int);
     va_end(args);
     assert(tid > 0 && cpu == -1);
+    assert(attr->use_clockid && attr->clockid == CLOCK_MONOTONIC);
     if (tid == fail_tid && attr->type == PERF_TYPE_RAW) {
         errno = EACCES;
         return -1;

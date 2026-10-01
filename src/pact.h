@@ -176,6 +176,15 @@ typedef struct {
     /* Cooling statistics */
     uint64_t cooling_decays;
 
+    /* Cumulative PEBS quality diagnostics, owned by the sampling coroutine. */
+    uint64_t pebs_lost_samples;
+    uint64_t pebs_lost_records;
+    uint64_t pebs_throttles;
+    uint64_t pebs_malformed;
+    uint64_t pebs_overruns;
+    uint64_t pebs_uncovered;
+    uint64_t pebs_update_drops;
+
     /* PEBS sampling */
     uint64_t pebs_events_processed;
 

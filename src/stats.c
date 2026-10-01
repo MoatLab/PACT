@@ -20,6 +20,12 @@ static void print_basic_stats(pact_context_t *pact)
     printf("LLC Misses (fast): %lu\n", pact->workload->stats.llc_misses_fast);
     printf("LLC Misses (slow): %lu\n", pact->workload->stats.llc_misses_slow);
     printf("PAC Updates: %lu\n", pact->workload->stats.pac_updates);
+    pact_stats_t *quality = &pact->workload->stats;
+    printf("Sampling quality: lost=%lu loss_records=%lu throttles=%lu malformed=%lu "
+           "overruns=%lu uncovered=%lu update_drops=%lu\n",
+           quality->pebs_lost_samples, quality->pebs_lost_records, quality->pebs_throttles,
+           quality->pebs_malformed, quality->pebs_overruns, quality->pebs_uncovered,
+           quality->pebs_update_drops);
     printf("Promotions (successful): %lu\n", pact->workload->stats.promotion_successes);
     printf("Demotions (kernel LRU): %lu\n", pact->workload->stats.demotion_successes);
     printf("Demotions (batch results): %lu\n", pact->workload->stats.pact_demotions);

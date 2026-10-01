@@ -69,9 +69,13 @@ int main(void)
     struct {
         struct perf_event_header header;
         uint32_t pid, tid;
+        uint64_t time;
         uint64_t addr;
-    } record = {
-        .header = {.type = PERF_RECORD_SAMPLE}, .pid = getpid(), .tid = getpid(), .addr = 4096};
+    } record = {.header = {.type = PERF_RECORD_SAMPLE},
+                .pid = getpid(),
+                .tid = getpid(),
+                .time = 0x123456789abcdef0ULL,
+                .addr = 4096};
     record.header.size = sizeof(record);
     memcpy((char *)cpu.pebs_mmap + PAGE_SIZE, &record, sizeof(record));
     sample_ring->data_head = sizeof(record);
@@ -83,6 +87,24 @@ int main(void)
     pebs_aggregator_t *agg = pebs_aggregator_create(&cpu, 1, 1);
     ctx.pebs_aggregator = agg;
     agg->pact_ctx = &ctx;
+    /* Timestamped records must retain the address even across ring wrap. */
+    wl.counters_valid = true;
+    const size_t bytes = PERF_BUFFER_PAGES * PAGE_SIZE;
+    const size_t starts[] = {0, bytes - 4, bytes - 16};
+    for (size_t n = 0; n < sizeof(starts) / sizeof(starts[0]); n++) {
+        for (size_t i = 0; i < sizeof(record); i++) {
+            ((char *)cpu.pebs_mmap + PAGE_SIZE)[(starts[n] + i) % bytes] = ((char *)&record)[i];
+        }
+        sample_ring->data_tail = starts[n];
+        sample_ring->data_head = starts[n] + sizeof(record);
+        uint64_t event = 0;
+        assert(read_cpu_pebs_events(agg, &cpu, &event, 1) == 1);
+        assert(event == PEBS_ENCODE_ADDR_TIER(record.addr, 1));
+        assert(sample_ring->data_tail == sample_ring->data_head);
+    }
+    memcpy((char *)cpu.pebs_mmap + PAGE_SIZE, &record, sizeof(record));
+    sample_ring->data_tail = 0;
+    sample_ring->data_head = sizeof(record);
     /* A scheduler deadline already expired while counters were disabled. */
     ctx.timing[CORO_TYPE_PEBS].next_tsc = 1;
     pebs_aggregator_coroutine(NULL);

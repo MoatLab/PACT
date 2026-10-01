@@ -29,3 +29,8 @@ counter restart, so newly covered threads cannot enter the previous window.
 `make -C src test-workload-exit` creates a real child and checks exit before
 reaping it. A pidfd must report termination while `kill(pid, 0)` still succeeds.
 The sampling-window test covers exit becoming visible during counter refresh.
+
+`make -C src test-pebs-quality` checks published perf-ring boundaries, wrapping
+records, loss/throttle accounting, target-thread coverage and staging/update
+queue drops through the actual reader and aggregation code under ASan/UBSan.
+It does not require PMU hardware.
