@@ -70,3 +70,8 @@ bin widths. It checks float-cast overflow under ASan/UBSan. The `PAC_DIST`
 `threshold` field is a floating-point value and may use scientific notation or
 `inf`; consumers should parse it as a floating-point number. These diagnostic
 checks do not establish an application performance improvement.
+
+`make -C src test-quiet-stats` runs the actual statistics coroutine across
+all five logging levels. Error/warning levels skip collection; INFO and higher
+still report the PAC distribution. Every level must yield and shut down cleanly.
+This verifies skipped diagnostic work, not application performance improvement.

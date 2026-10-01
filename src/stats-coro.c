@@ -118,6 +118,12 @@ void stats_coroutine(mco_coro *co)
     uint64_t last_tsc = ctx->start_tsc;
 
     while (ctx->running) {
+        /* Logging levels are fixed before threads start. Do not walk the PAC
+         * table or compute rates when this coroutine's INFO output is disabled. */
+        if (global_log_level < LOG_LEVEL_INFO) {
+            mco_yield(co);
+            continue;
+        }
         uint64_t now = rdtsc();
         double elapsed_sec = (double)(now - last_tsc) / ctx->tsc_freq_hz;
         pact_stats_t *st = &ctx->workload->stats;

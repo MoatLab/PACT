@@ -169,3 +169,12 @@ test-pac-threshold:
 	    -ffunction-sections -fdata-sections \
 	    ../tests/test-pac-threshold.c cooling.c obj-pool.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-quiet-stats
+test-quiet-stats:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-quiet-stats.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

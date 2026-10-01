@@ -63,3 +63,6 @@ jobs:
 
       - name: PAC threshold diagnostic regression
         run: make -C src test-pac-threshold
+
+      - name: Quiet statistics regression
+        run: make -C src test-quiet-stats
