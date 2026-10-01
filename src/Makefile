@@ -136,3 +136,12 @@ test-pmu-control:
 	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
 	    ../tests/test-pmu-control.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-bin-index
+test-bin-index:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined,float-cast-overflow -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-bin-index.c cooling.c obj-pool.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

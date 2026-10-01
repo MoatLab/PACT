@@ -334,7 +334,10 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
 
     size_t bin_index = (size_t)-1;
     if (bin && bin->bin_width > 0) {
-        bin_index = (size_t)(meta->pac_value / bin->bin_width);
+        double index = meta->pac_value / bin->bin_width;
+        /* Small positive widths can exceed size_t, including infinity.
+         * Such scores belong to the top bin; avoid an undefined cast. */
+        bin_index = index < (double)SIZE_MAX ? (size_t)index : SIZE_MAX;
     }
     const char *tier_str = (meta->tier == 0) ? "fast" : (meta->tier == 1) ? "slow" : "unknown";
     log_pac_update(pact, "update_pac_entry", pact->workload ? 0 : -1, page_addr, meta->pac_value,

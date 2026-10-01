@@ -42,3 +42,11 @@ incomplete CHA coverage. It exercises the runtime reader under ASan/UBSan.
 `make -C src test-pmu-control` injects reset, enable, and disable failures
 into core, CHA, and task groups. Every failure must stop sampling and attempt
 to disable all configured groups; offline core slots are skipped.
+
+## Bin-index bounds
+
+`make -C src test-bin-index` runs the actual PAC update and promotion-queue
+path with AddressSanitizer, UndefinedBehaviorSanitizer and float-cast overflow
+checks. It verifies very small finite bin widths, scores at the uint64 limit,
+zero scores, and ordinary admission boundaries. Oversized bin indices saturate
+without changing the score or normal threshold behavior.

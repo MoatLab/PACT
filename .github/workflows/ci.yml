@@ -51,3 +51,6 @@ jobs:
 
       - name: PMU control failure regression
         run: make -C src test-pmu-control
+
+      - name: Bin-index bounds regression
+        run: make -C src test-bin-index
