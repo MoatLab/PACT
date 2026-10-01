@@ -647,24 +647,46 @@ int setup_counting_event(perf_event_t *perf_event, pid_t pid, int cpu, perf_even
 /* Read an event group */
 int read_pmu_event_group(event_group_t *event_group)
 {
+    event_group->read_valid = false;
+    memset(event_group->values, 0, sizeof(event_group->values));
     if (event_group->fds[0] < 0) {
-        return -1; /* Group not available */
+        event_group->needs_resync = true;
+        return -1;
     }
-    uint64_t te = event_group->time_enabled, tr = event_group->time_running;
+    uint64_t te = 0, tr = 0;
     int bytes_read =
         read_perf_event_group_raw(event_group->fds[0], event_group->ids, event_group->values,
                                   event_group->counters_used, &te, &tr, false);
-    if (bytes_read > 0) {
-        event_group->last_time_enabled = event_group->time_enabled;
-        event_group->last_time_running = event_group->time_running;
-        event_group->time_enabled = te;
-        event_group->time_running = tr;
+    if (bytes_read <= 0) {
+        memset(event_group->values, 0, sizeof(event_group->values));
+        event_group->needs_resync = true;
+        return -1;
     }
+
+    bool resync = event_group->needs_resync;
+    uint64_t previous_enabled = event_group->time_enabled;
+    uint64_t previous_running = event_group->time_running;
+    event_group->last_time_enabled = previous_enabled;
+    event_group->last_time_running = previous_running;
+    event_group->time_enabled = te;
+    event_group->time_running = tr;
+    event_group->needs_resync = false;
+    /* RESET clears counts but not scheduling time. After a failed read, the
+     * next successful read only restores a boundary for the following window. */
+    if (resync || te < previous_enabled || tr < previous_running ||
+        tr - previous_running > te - previous_enabled || tr > te) {
+        memset(event_group->values, 0, sizeof(event_group->values));
+        return -1;
+    }
+    event_group->read_valid = true;
     return 0;
 }
 
 void scale_multiplexed_events(event_group_t *event_group)
 {
+    if (!event_group->read_valid) {
+        return;
+    }
     double scale_factor = 1.0;
     if (event_group->time_running - event_group->last_time_running == 0) {
         return; /* No change in time_running, no scaling needed */
@@ -696,12 +718,12 @@ static double calculate_tier_mlp(pact_workload_t *wl, int tier)
         event_group_t *group =
             (tier == 0) ? &wl->cha_pmus[cha].group_fast : &wl->cha_pmus[cha].group_slow;
 
-        /* Skip groups scheduled for under 1 ms of THIS window; their
+        /* Reject incomplete coverage or groups scheduled under 1 ms; their
          * scaled-up readings are noise. time_running is cumulative since
          * open (IOC_RESET clears only counter values), so the window's
          * share is the delta against the previous read. */
-        if (group->time_running - group->last_time_running < 1000000) {
-            continue;
+        if (!group->read_valid || group->time_running - group->last_time_running < 1000000) {
+            return -1.0;
         }
         valid_groups++;
         sum_occupancy += group->values[CHA_TOR_OCCUPANCY];
@@ -725,21 +747,18 @@ static double calculate_tier_mlp(pact_workload_t *wl, int tier)
     return mlp;
 }
 
-/* Fresh per-tier MLP ratios for this window; no cross-window smoothing.
- * A window with no valid measurement (every CHA group multiplexed out)
- * keeps the previous window's value instead of fabricating the minimum,
- * which would over-attribute stalls for that window. */
+/* Attribute samples only when both tiers have fresh, complete CHA coverage. */
 static void calculate_workload_mlp(pact_workload_t *wl)
 {
     double fast = calculate_tier_mlp(wl, 0);
     double slow = calculate_tier_mlp(wl, 1);
 
-    if (fast >= 0.0) {
-        wl->workload_mlp_fast = fast;
+    if (fast < 0.0 || slow < 0.0) {
+        wl->counters_valid = false;
+        return;
     }
-    if (slow >= 0.0) {
-        wl->workload_mlp_slow = slow;
-    }
+    wl->workload_mlp_fast = fast;
+    wl->workload_mlp_slow = slow;
 }
 
 /* Sum task-local counts only from covered groups; MLP uses CHA TOR ratios. */

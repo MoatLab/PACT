@@ -45,3 +45,6 @@ jobs:
 
       - name: PEBS quality accounting regression
         run: make -C src test-pebs-quality
+
+      - name: CHA counter freshness regression
+        run: make -C src test-cha-freshness

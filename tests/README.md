@@ -34,3 +34,7 @@ The sampling-window test covers exit becoming visible during counter refresh.
 records, loss/throttle accounting, target-thread coverage and staging/update
 queue drops through the actual reader and aggregation code under ASan/UBSan.
 It does not require PMU hardware.
+
+`make -C src test-cha-freshness` injects failed and malformed CHA group reads,
+checks recovery boundaries and scheduling-time rollback, and rejects MLP from
+incomplete CHA coverage. It exercises the runtime reader under ASan/UBSan.

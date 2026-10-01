@@ -4,6 +4,7 @@
 #ifndef PACT_PMU_H
 #define PACT_PMU_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 #include <linux/perf_event.h>
@@ -32,6 +33,8 @@ typedef struct event_group {
     uint64_t time_running;
     uint64_t last_time_enabled;
     uint64_t last_time_running;
+    bool read_valid;
+    bool needs_resync; /* A failed read loses the scheduling-time window boundary. */
 } event_group_t;
 
 typedef struct cha_pmu_info {
