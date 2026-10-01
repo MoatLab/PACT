@@ -3,7 +3,7 @@
 #include "../src/perf.c"
 #include <assert.h>
 
-static bool available, started;
+static bool available, started, workload_failed, control_failed;
 int discover_cha_pmus(cha_pmu_info_t *pmus, int *nr, uint64_t mask)
 {
     (void)pmus;
@@ -38,11 +38,11 @@ int setup_pebs_event(per_cpu_state_t *cpu, pid_t pid, int id)
 int setup_workload_counting_events(pact_workload_t *wl)
 {
     (void)wl;
-    return 0;
+    return workload_failed ? -1 : 0;
 }
 void start_pmu_perf_events(pact_context_t *ctx)
 {
-    (void)ctx;
+    ctx->sampling_failed = control_failed;
     started = true;
 }
 int main(void)
@@ -56,4 +56,13 @@ int main(void)
     available = true;
     assert(setup_pact_perf_events(&ctx) == 0);
     assert(started);
+    started = false;
+    workload_failed = true;
+    assert(setup_pact_perf_events(&ctx) < 0);
+    assert(ctx.sampling_failed && !started);
+    ctx.sampling_failed = false;
+    workload_failed = false;
+    control_failed = true;
+    assert(setup_pact_perf_events(&ctx) < 0);
+    assert(ctx.sampling_failed && started);
 }

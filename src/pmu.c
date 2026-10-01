@@ -337,67 +337,86 @@ int setup_pmu_cha_perf_events(cha_pmu_info_t *cha_pmus, int *nr_cha)
     return total_events;
 }
 
-/* manipulate CHA PMU counters */
-void ioctl_pmu_cha_perf_events(cha_pmu_info_t *cha_pmus, int nr_cha, int request)
+/* Every group operation must succeed before its measurements can be used.
+ * Keep trying other groups on failure so DISABLE performs best-effort cleanup. */
+static int control_pmu_group(int fd, int request)
 {
-    for (int i = 0; i < nr_cha; i++) {
-        ioctl(cha_pmus[i].group_fast.fds[0], request, PERF_IOC_FLAG_GROUP);
-        ioctl(cha_pmus[i].group_slow.fds[0], request, PERF_IOC_FLAG_GROUP);
+    if (ioctl(fd, request, PERF_IOC_FLAG_GROUP) == 0) {
+        return 0;
     }
+    log_error("pmu_control", "Failed request 0x%x on fd %d: %s", request, fd, strerror(errno));
+    return -1;
 }
 
-/* manipulate per-cpu PMU counters, includes fast/slow tier pebs, and counting events if no pid is specified */
-void ioctl_pmu_core_perf_events(per_cpu_state_t *cpu_states, int nr_target_cpus, int request)
+int ioctl_pmu_cha_perf_events(cha_pmu_info_t *cha_pmus, int nr_cha, int request)
 {
-    for (int i = 0; i < nr_target_cpus; i++) {
-        ioctl(cpu_states[i].leader.fd, request, PERF_IOC_FLAG_GROUP);
+    int result = 0;
+    for (int i = 0; i < nr_cha; i++) {
+        if (control_pmu_group(cha_pmus[i].group_fast.fds[0], request) < 0) {
+            result = -1;
+        }
+        if (control_pmu_group(cha_pmus[i].group_slow.fds[0], request) < 0) {
+            result = -1;
+        }
     }
+    return result;
+}
+
+int ioctl_pmu_core_perf_events(per_cpu_state_t *cpu_states, int nr_target_cpus, int request)
+{
+    int result = 0;
+    for (int i = 0; i < nr_target_cpus; i++) {
+        /* Offline CPUs have no group. Errors on existing groups are fatal. */
+        int fd = cpu_states[i].leader.fd;
+        if (fd >= 0 && control_pmu_group(fd, request) < 0) {
+            result = -1;
+        }
+    }
+    return result;
+}
+
+static int control_workload_groups(pact_workload_t *wl, int request)
+{
+    int result = 0;
+    for (size_t i = 0; i < wl->nr_threads; i++) {
+        if (control_pmu_group(wl->threads[i].leader.fd, request) < 0) {
+            result = -1;
+        }
+    }
+    return result;
+}
+
+static void fail_pmu_control(pact_context_t *ctx)
+{
+    ctx->sampling_failed = true;
+    ctx->running = false;
 }
 
 void start_pmu_perf_events(pact_context_t *ctx)
 {
     pact_workload_t *wl = ctx->workload;
-    ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_RESET);
-    ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_RESET);
-    for (size_t i = 0; i < wl->nr_threads; i++) {
-        if (ioctl(wl->threads[i].leader.fd, PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP) < 0) {
-            ctx->sampling_failed = true;
-            ctx->running = false;
-            log_error("pmu_control", "Failed to control TID %d: %s", wl->threads[i].tid,
-                      strerror(errno));
-        }
+    if (ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_RESET) < 0 ||
+        ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_RESET) < 0 ||
+        control_workload_groups(wl, PERF_EVENT_IOC_RESET) < 0 ||
+        ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_ENABLE) < 0 ||
+        control_workload_groups(wl, PERF_EVENT_IOC_ENABLE) < 0 ||
+        ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_ENABLE) < 0) {
+        fail_pmu_control(ctx);
+        stop_pmu_perf_events(ctx);
     }
-    if (ctx->sampling_failed) {
-        return;
-    }
-    ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_ENABLE);
-    for (size_t i = 0; i < wl->nr_threads; i++) {
-        if (ioctl(wl->threads[i].leader.fd, PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP) < 0) {
-            ctx->sampling_failed = true;
-            ctx->running = false;
-            log_error("pmu_control", "Failed to control TID %d: %s", wl->threads[i].tid,
-                      strerror(errno));
-        }
-    }
-    if (ctx->sampling_failed) {
-        return;
-    }
-    ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_ENABLE);
 }
 
 void stop_pmu_perf_events(pact_context_t *ctx)
 {
     pact_workload_t *wl = ctx->workload;
-    ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_DISABLE);
-    for (size_t i = 0; i < wl->nr_threads; i++) {
-        if (ioctl(wl->threads[i].leader.fd, PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP) < 0) {
-            ctx->sampling_failed = true;
-            ctx->running = false;
-            log_error("pmu_control", "Failed to control TID %d: %s", wl->threads[i].tid,
-                      strerror(errno));
-        }
+    /* Do not short-circuit: stop every group even if an earlier stop failed. */
+    int cha = ioctl_pmu_cha_perf_events(wl->cha_pmus, wl->nr_cha, PERF_EVENT_IOC_DISABLE);
+    int tasks = control_workload_groups(wl, PERF_EVENT_IOC_DISABLE);
+    int core =
+        ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_DISABLE);
+    if (cha < 0 || tasks < 0 || core < 0) {
+        fail_pmu_control(ctx);
     }
-    ioctl_pmu_core_perf_events(ctx->cpu_states, ctx->nr_all_cpus, PERF_EVENT_IOC_DISABLE);
 }
 
 void read_pmu_cha_perf_events(cha_pmu_info_t *cha_pmus, int nr_cha)

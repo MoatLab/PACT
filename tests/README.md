@@ -38,3 +38,7 @@ It does not require PMU hardware.
 `make -C src test-cha-freshness` injects failed and malformed CHA group reads,
 checks recovery boundaries and scheduling-time rollback, and rejects MLP from
 incomplete CHA coverage. It exercises the runtime reader under ASan/UBSan.
+
+`make -C src test-pmu-control` injects reset, enable, and disable failures
+into core, CHA, and task groups. Every failure must stop sampling and attempt
+to disable all configured groups; offline core slots are skipped.

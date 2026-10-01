@@ -48,3 +48,6 @@ jobs:
 
       - name: CHA counter freshness regression
         run: make -C src test-cha-freshness
+
+      - name: PMU control failure regression
+        run: make -C src test-pmu-control

@@ -128,3 +128,11 @@ test-cha-freshness:
 	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
 	    ../tests/test-cha-freshness.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-pmu-control
+test-pmu-control:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-pmu-control.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
