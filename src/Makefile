@@ -145,3 +145,10 @@ test-bin-index:
 	    -ffunction-sections -fdata-sections \
 	    ../tests/test-bin-index.c cooling.c obj-pool.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-binning
+test-binning:
+	@set -eu; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -D_GNU_SOURCE -I. -O1 -g -fsanitize=address,undefined \
+	    -ffunction-sections -fdata-sections ../tests/test-binning.c binning.c \
+	    -Wl,--gc-sections -lm -o "$$test_bin"; "$$test_bin"

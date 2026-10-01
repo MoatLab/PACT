@@ -50,3 +50,11 @@ path with AddressSanitizer, UndefinedBehaviorSanitizer and float-cast overflow
 checks. It verifies very small finite bin widths, scores at the uint64 limit,
 zero scores, and ordinary admission boundaries. Oversized bin indices saturate
 without changing the score or normal threshold behavior.
+
+## Adaptive binning quartiles
+
+`make -C src test-binning` compares the actual quartile calculation with an
+independent full-sort oracle for repeated, ordered, reverse-ordered and random
+scores, including the production reservoir size of 100. It also checks input
+preservation under ASan/UBSan. Optional `--bench` output from the test binary
+measures local CPU time only; application performance needs native experiments.

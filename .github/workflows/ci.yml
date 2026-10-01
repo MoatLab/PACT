@@ -54,3 +54,6 @@ jobs:
 
       - name: Bin-index bounds regression
         run: make -C src test-bin-index
+
+      - name: Quartile selection regression
+        run: make -C src test-binning

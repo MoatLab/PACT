@@ -17,43 +17,37 @@
 #define PACT_BINNING_TH_SCALE 0.7
 #endif
 
-/* Partition for quickselect. Returns pivot final position. */
-static size_t partition(double *arr, size_t low, size_t high)
-{
-    double pivot = arr[high];
-    size_t i = low;
-
-    for (size_t j = low; j < high; j++) {
-        if (arr[j] <= pivot) {
-            double temp = arr[i];
-            arr[i] = arr[j];
-            arr[j] = temp;
-            i++;
-        }
-    }
-
-    double temp = arr[i];
-    arr[i] = arr[high];
-    arr[high] = temp;
-    return i;
-}
-
-/* Quickselect — k-th smallest element, O(n) average. */
+/* Three-way selection skips equal scores together. PAC reservoirs often
+ * contain repeated values; a two-way partition makes those inputs quadratic.
+ * Iterate rather than recurse so adversarial inputs cannot grow the stack. */
 static double quickselect(double *arr, size_t low, size_t high, size_t k)
 {
-    if (low == high) {
-        return arr[low];
-    }
+    while (low < high) {
+        double pivot = arr[low + (high - low) / 2];
+        size_t less = low, scan = low, greater = high;
 
-    size_t pivot_idx = partition(arr, low, high);
+        while (scan <= greater) {
+            double value = arr[scan];
+            if (value < pivot) {
+                arr[scan++] = arr[less];
+                arr[less++] = value;
+            } else if (value > pivot) {
+                arr[scan] = arr[greater];
+                arr[greater--] = value;
+            } else {
+                scan++;
+            }
+        }
 
-    if (k == pivot_idx) {
-        return arr[k];
-    } else if (k < pivot_idx) {
-        return quickselect(arr, low, pivot_idx - 1, k);
-    } else {
-        return quickselect(arr, pivot_idx + 1, high, k);
+        if (k < less) {
+            high = less - 1;
+        } else if (k > greater) {
+            low = greater + 1;
+        } else {
+            return arr[k];
+        }
     }
+    return arr[low];
 }
 
 void calculate_quartiles(reservoir_t *r, double *q1, double *q3)
