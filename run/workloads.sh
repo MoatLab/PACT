@@ -43,41 +43,48 @@ bc_kron_8t_pname="bc"
 bc_kron_8t_rss=20000
 bc_kron_8t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
 bc_kron_8t_omp_threads=8
-bc_kron_8t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n4"
+printf -v bc_kron_8t_workload_cmd '%s %q -f %q -i4 -n4' '$numactl_args' \
+    "${GAPBS_DIR}/bc" "${GAPBS_GRAPH_DIR}/kron.sg"
 
 # --- bc_kron_4t : same workload, 4 threads
 bc_kron_4t_pname="bc"
 bc_kron_4t_rss=20000
 bc_kron_4t_vmtouch_file="${GAPBS_GRAPH_DIR}/kron.sg"
 bc_kron_4t_omp_threads=4
-bc_kron_4t_workload_cmd="\$numactl_args ${GAPBS_DIR}/bc -f ${GAPBS_GRAPH_DIR}/kron.sg -i4 -n4"
+bc_kron_4t_workload_cmd="$bc_kron_8t_workload_cmd"
 
 # --- bwaves_8t : SPEC CPU 2017 603.bwaves_s, 8 threads
 bwaves_8t_pname="speed_bwaves_base.mytest-m64"
 bwaves_8t_vmtouch_file=""
 bwaves_8t_omp_threads=8
-bwaves_8t_workload_cmd="cd ${SPEC_DIR}/603.bwaves_s && \$numactl_args ./speed_bwaves_base.mytest-m64 bwaves_1 < bwaves_1.in > bwaves_1.out 2>> bwaves_1.err"
+printf -v bwaves_8t_workload_cmd 'cd %q && %s' "${SPEC_DIR}/603.bwaves_s" \
+    '$numactl_args ./speed_bwaves_base.mytest-m64 bwaves_1 < bwaves_1.in > bwaves_1.out 2>> bwaves_1.err'
 
 # --- w_649_8t : SPEC CPU 2017 649.fotonik3d_s, 8 threads
 w_649_8t_pname="fotonik3d_s_base.mytest-m64"
 w_649_8t_vmtouch_file=""
 w_649_8t_omp_threads=8
-w_649_8t_workload_cmd="cd ${SPEC_DIR}/649.fotonik3d_s && \$numactl_args ./cmd.sh"
+printf -v w_649_8t_workload_cmd 'cd %q && %s' "${SPEC_DIR}/649.fotonik3d_s" \
+    '$numactl_args ./cmd.sh'
 
 # --- silo_5t : Silo in-memory DB, YCSB bench, 5 threads
 silo_5t_pname="dbtest"
 silo_5t_vmtouch_file=""
 silo_5t_omp_threads=5
-silo_5t_workload_cmd="\$numactl_args ${SILO_DIR}/out-perf.masstree/benchmarks/dbtest --verbose --bench ycsb --num-threads 5 --scale-factor 240000 --parallel-loading --runtime 300"
+printf -v silo_5t_workload_cmd '%s %q %s' '$numactl_args' \
+    "${SILO_DIR}/out-perf.masstree/benchmarks/dbtest" \
+    '--verbose --bench ycsb --num-threads 5 --scale-factor 240000 --parallel-loading --runtime 300'
 
 # --- ptr_chase : pointer-chasing microbenchmark (latency-bound)
 ptr_chase_pname="ptr_chase"
 ptr_chase_vmtouch_file=""
 ptr_chase_omp_threads=1
-ptr_chase_workload_cmd="cd ${UBENCH_DIR} && \$numactl_args timeout 200 ./ptr_chase 5120 10"
+printf -v ptr_chase_workload_cmd 'cd %q && %s' "$UBENCH_DIR" \
+    '$numactl_args timeout 200 ./ptr_chase 5120 10'
 
 # --- seq_array : sequential-array microbenchmark (bandwidth-bound)
 seq_array_pname="seq_array"
 seq_array_vmtouch_file=""
 seq_array_omp_threads=1
-seq_array_workload_cmd="cd ${UBENCH_DIR} && \$numactl_args timeout 200 ./seq_array 5120 10"
+printf -v seq_array_workload_cmd 'cd %q && %s' "$UBENCH_DIR" \
+    '$numactl_args timeout 200 ./seq_array 5120 10'

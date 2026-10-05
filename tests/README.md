@@ -83,3 +83,8 @@ keeps the test independent of host CPU numbering. Fatal `safe_calloc` failures
 must retain their existing nonzero exit behavior. UBSan rejects invalid
 accesses inside allocation helpers before the caller can handle failure.
 
+Run `python3 tests/test-workload-paths.py` to check the seven built-in
+workload definitions with paths containing spaces and shell metacharacters.
+The tests execute argument-recording stand-ins through both Bash command and
+`eval` launch forms. They require Python 3, Bash and `timeout`, but no root,
+PMU hardware, benchmark datasets or licensed SPEC binaries.
