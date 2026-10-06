@@ -64,15 +64,16 @@ pact_context_t *g_pact_ctx = NULL;
 /* Alloc / free PAC metadata via the object pool. */
 pac_metadata_t *alloc_pac_metadata(pact_context_t *pact)
 {
-    if (!pact || !pact->pac_metadata_pool) {
-        /* Fallback to malloc if pool not available */
+    if (!pact) {
         return calloc(1, sizeof(pac_metadata_t));
     }
 
     /* Enforce pool capacity cap to prevent OOM at aggressive periods */
     if (pact->max_pac_entries > 0) {
-        size_t in_use =
-            get_total_capacity(pact->pac_metadata_pool) - pool_available(pact->pac_metadata_pool);
+        /* Heap fallback still has one metadata object per tracked page. */
+        size_t in_use = pact->pac_metadata_pool ? get_total_capacity(pact->pac_metadata_pool) -
+                                                      pool_available(pact->pac_metadata_pool)
+                                                : kh_size(pact->workload->pac_table);
         if (in_use >= pact->max_pac_entries) {
             pact->workload->stats.pool_alloc_skipped++;
             /* Rate-limit: warn at first skip + at most once per second.
@@ -89,6 +90,10 @@ pac_metadata_t *alloc_pac_metadata(pact_context_t *pact)
             }
             return NULL;
         }
+    }
+
+    if (!pact->pac_metadata_pool) {
+        return calloc(1, sizeof(pac_metadata_t));
     }
 
     pac_metadata_t *meta = (pac_metadata_t *)pool_alloc_zero(pact->pac_metadata_pool);

@@ -197,3 +197,12 @@ test-pool-limit:
 	    ../tests/test-pool-limit.c cli.c config.c error.c obj-pool.c \
 	    -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-pool-fallback
+test-pool-fallback:
+	@set -eu; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -D_GNU_SOURCE -I. -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=undefined -fno-sanitize-recover=all \
+	    ../tests/test-pool-fallback.c error.c obj-pool.c \
+	    -Wl,--gc-sections -Wl,--wrap=pool_create -lm -o "$$test_bin"; \
+	"$$test_bin"

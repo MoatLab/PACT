@@ -92,3 +92,7 @@ PMU hardware, benchmark datasets or licensed SPEC binaries.
 `make -C src test-pool-limit` checks the actual CLI and pool initialization:
 default and explicit limits, `0` for unlimited, saturation at one entry, and
 rejection of malformed or overflowing values. It requires no PMU hardware.
+
+`make -C src test-pool-fallback` injects pool-creation failure and checks that
+heap-backed PAC entries still obey the configured cap. It also checks the
+normal pool path, unlimited mode, skip accounting, and cleanup.
