@@ -191,9 +191,20 @@ int pact_parse_command_line_args(int argc, char *argv[], pact_config_t *config)
                         "Error: --pac-pool-max requires an argument (entries; 0=unlimited)\n");
                 return -1;
             }
-            config->pac_pool_max = (size_t)strtoull(argv[i], NULL, 10);
-            printf("PAC metadata pool cap: %zu entries (~%zu MB at 128B/entry)\n",
-                   config->pac_pool_max, config->pac_pool_max * 128 / (1024 * 1024));
+            errno = 0;
+            char *end = NULL;
+            unsigned long long limit = strtoull(argv[i], &end, 10);
+            if (argv[i][0] < '0' || argv[i][0] > '9' || *end != '\0' || errno != 0 ||
+                limit > SIZE_MAX) {
+                fprintf(stderr, "Error: --pac-pool-max must be a non-negative integer\n");
+                return -1;
+            }
+            config->pac_pool_max = (size_t)limit;
+            if (limit == 0) {
+                printf("PAC metadata pool cap: unlimited\n");
+            } else {
+                printf("PAC metadata pool cap: %zu entries\n", config->pac_pool_max);
+            }
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             pact_print_usage(argv[0]);
             return 1;

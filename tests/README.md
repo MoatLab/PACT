@@ -88,3 +88,7 @@ workload definitions with paths containing spaces and shell metacharacters.
 The tests execute argument-recording stand-ins through both Bash command and
 `eval` launch forms. They require Python 3, Bash and `timeout`, but no root,
 PMU hardware, benchmark datasets or licensed SPEC binaries.
+
+`make -C src test-pool-limit` checks the actual CLI and pool initialization:
+default and explicit limits, `0` for unlimited, saturation at one entry, and
+rejection of malformed or overflowing values. It requires no PMU hardware.

@@ -944,16 +944,12 @@ static void init_pac_update_ring(pact_context_t *pact)
     memset(pact->coroutines, 0, sizeof(pact->coroutines));
 }
 
-/* Initialize PAC metadata object pool. Caps entries to prevent OOM at
- * aggressive PEBS periods; 2M × 128B = ~256 MB fallback. */
+/* Initialize the pool; configuration supplies the default or explicit limit. */
 static void init_pac_metadata_pool(pact_context_t *pact)
 {
     pact->pac_metadata_pool = pool_create(sizeof(pac_metadata_t), 1000, 500, false);
     if (!pact->pac_metadata_pool) {
         log_error("pact_init", "Failed to initialize PAC metadata pool");
-    }
-    if (pact->max_pac_entries == 0) {
-        pact->max_pac_entries = 2UL * 1024 * 1024;
     }
     log_info("pact_init", "PAC metadata pool: max_entries=%zu", pact->max_pac_entries);
 }

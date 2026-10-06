@@ -32,7 +32,7 @@
 #define PACT_DEFAULT_MAX_MIGRATIONS_PER_CYCLE 4096U
 #define PACT_INITIAL_BIN_WIDTH 1000.0
 #define PACT_INITIAL_BIN_COUNT 20U
-#define PACT_DEFAULT_PAC_POOL_MAX (2UL * 1024 * 1024) /* 2M entries (~256MB at 128B/entry) */
+#define PACT_DEFAULT_PAC_POOL_MAX (2UL * 1024 * 1024) /* 2M tracked pages */
 
 typedef struct pact_config {
     demotion_policy_t demotion_policy;

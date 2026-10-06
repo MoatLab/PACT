@@ -67,7 +67,7 @@ void pact_print_usage(const char *prog_name)
     printf("  --cooling-trigger-samples N       Samples before cooling kicks in "
            "(default 200000).\n");
     printf("  --pac-pool-max N                  Max tracked pages "
-           "(default 2097152).\n");
+           "(default 2097152; 0 = unlimited).\n");
     printf("  --demotion-margin M               Keep kernel demotion on while "
            "demoted <\n");
     printf("                                    promoted + M pages; larger M = more "
