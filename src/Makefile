@@ -178,3 +178,13 @@ test-quiet-stats:
 	    -ffunction-sections -fdata-sections \
 	    ../tests/test-quiet-stats.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-startup-alloc
+test-startup-alloc:
+	@set -eu; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -D_GNU_SOURCE -I. -O1 -g -ffunction-sections -fdata-sections \
+	    -fsanitize=undefined -fno-sanitize-recover=all \
+	    ../tests/test-startup-alloc.c config.c error.c obj-pool.c \
+	    -Wl,--gc-sections -Wl,--wrap=calloc -Wl,--wrap=free \
+	    -Wl,--wrap=sched_getaffinity -lm -o "$$test_bin"; \
+	python3 ../tests/test-startup-alloc.py "$$test_bin"

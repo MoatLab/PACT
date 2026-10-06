@@ -1181,6 +1181,10 @@ static int init_workload(pact_workload_t *wl, const pact_config_t *config, int m
     memset(&wl->stats, 0, sizeof(pact_stats_t));
 
     wl->pac_table = pac_table_init();
+    if (!wl->pac_table) {
+        log_error("init_workload", "Failed to allocate PAC table");
+        return -1;
+    }
     wl->reservoir = reservoir_create(RESERVOIR_SIZE);
     wl->binning = safe_calloc(1, sizeof(binning_state_t), "wl->binning");
 
@@ -1196,6 +1200,7 @@ static void cleanup_workload(pact_context_t *pact)
     if (!pact->workload) {
         return;
     }
+    destroy_per_workload_data(pact);
     free(pact->workload->target_cpus);
     free(pact->workload);
     pact->workload = NULL;

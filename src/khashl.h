@@ -125,6 +125,7 @@ static kh_inline khint_t __kh_h2b(khint_t hash, khint_t bits) { return hash * 26
 #define __KHASHL_IMPL_BASIC(SCOPE, HType, prefix) \
 	SCOPE HType *prefix##_init2(void *km) { \
 		HType *h = Kcalloc(km, HType, 1); \
+		if (!h) return 0; \
 		h->km = km; \
 		return h; \
 	} \

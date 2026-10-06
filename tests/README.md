@@ -75,3 +75,11 @@ checks do not establish an application performance improvement.
 all five logging levels. Error/warning levels skip collection; INFO and higher
 still report the PAC distribution. Every level must yield and shut down cleanly.
 This verifies skipped diagnostic work, not application performance improvement.
+
+`make -C src test-startup-alloc` exercises workload initialization with each
+`calloc` call failed in turn. It checks that a missing PAC table is rejected
+and recoverable failures free all earlier allocations. A fixed affinity fixture
+keeps the test independent of host CPU numbering. Fatal `safe_calloc` failures
+must retain their existing nonzero exit behavior. UBSan rejects invalid
+accesses inside allocation helpers before the caller can handle failure.
+
