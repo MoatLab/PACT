@@ -66,3 +66,12 @@ jobs:
 
       - name: Quiet statistics regression
         run: make -C src test-quiet-stats
+
+      - name: Workload startup and metadata limits
+        run: make -C src test-startup-alloc test-pool-limit test-pool-fallback
+
+      - name: Workload startup and metadata limits (logging variant)
+        run: make -C src test-startup-alloc test-pool-limit test-pool-fallback CC="gcc -DPACT_ENABLE_LOGGING"
+
+      - name: Literal workload paths
+        run: python3 tests/test-workload-paths.py
