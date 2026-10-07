@@ -40,6 +40,9 @@ jobs:
       - name: Thread counter coverage regression
         run: make -C src test-thread-coverage
 
+      - name: Reject incomplete task scans
+        run: make -C src test-task-scan-error
+
       - name: Workload exit regression
         run: make -C src test-workload-exit
 

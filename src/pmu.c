@@ -879,7 +879,13 @@ int setup_workload_counting_events(pact_workload_t *wl)
     size_t count = 0, capacity = 0;
     struct dirent *de;
     int result = 0;
-    while ((de = readdir(dir))) {
+    for (;;) {
+        errno = 0;
+        de = readdir(dir);
+        if (!de) {
+            result = errno ? -1 : 0;
+            break;
+        }
         char *end;
         long id = strtol(de->d_name, &end, 10);
         if (*end || id <= 0 || id > INT_MAX) {
@@ -976,12 +982,16 @@ int setup_workload_counting_events(pact_workload_t *wl)
             }
         }
     }
+    int saved_error = errno;
     closedir(dir);
     cleanup_workload_counting_events(wl);
     wl->threads = next;
     wl->nr_threads = count;
     if (count) {
         qsort(next, count, sizeof(*next), compare_thread_id);
+    }
+    if (result < 0) {
+        errno = saved_error;
     }
     return count ? result : -1;
 }

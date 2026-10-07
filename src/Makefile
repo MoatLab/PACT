@@ -236,3 +236,12 @@ test-migration-stop:
 	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
 	    ../tests/test-migration-stop.c error.c -Wl,--gc-sections -lm -lpthread -o "$$test_bin"; \
 	"$$test_bin"
+
+.PHONY: test-task-scan-error
+test-task-scan-error:
+	@set -eu; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -Werror -std=gnu11 -O1 -g -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-task-scan-error.c error.c perf.c \
+	    -Wl,--gc-sections -lm -lnuma -lpthread -o "$$test_bin"; \
+	"$$test_bin" 1; "$$test_bin" 0
