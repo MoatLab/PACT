@@ -87,3 +87,6 @@ jobs:
 
       - name: Migration worker lifecycle (logging variant)
         run: make -C src test-migration-stop test-migration-wakeup test-migration-wait-stress CC="gcc -DPACT_ENABLE_LOGGING"
+
+      - name: Migration status recovery regression
+        run: make -C src test-migration-recovery

@@ -245,3 +245,11 @@ test-task-scan-error:
 	    ../tests/test-task-scan-error.c error.c perf.c \
 	    -Wl,--gc-sections -lm -lnuma -lpthread -o "$$test_bin"; \
 	"$$test_bin" 1; "$$test_bin" 0
+
+.PHONY: test-migration-recovery
+test-migration-recovery:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-migration-recovery.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"

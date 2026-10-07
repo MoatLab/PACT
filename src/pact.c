@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <errno.h>
+#include <limits.h>
 #include <sched.h>
 #include <sys/mman.h>
 #include <sys/eventfd.h>
@@ -425,6 +426,14 @@ static void process_migration_batch_results(pact_context_t *ctx, pac_metadata_t 
             continue; /* synthetic neighbor — no metadata to update */
         }
 
+        if (status[i] == INT_MIN) {
+            /* Neither migration nor the residency query supplied a result. */
+            meta->migrating = false;
+            atomic_inc_relaxed(&ctx->workload->stats.promotion_failures);
+            log_debug("migration_thread", "Page %p migration outcome is unknown",
+                      (void *)meta->page_addr);
+            continue;
+        }
         if (status[i] < 0) {
             /* Promotion failed — mark as not migrating so it can be re-selected. */
             meta->migrating = false;
@@ -487,12 +496,56 @@ static void process_migration_batch_results(pact_context_t *ctx, pac_metadata_t 
  * Dedicated migration thread - busy-waits on per-workload ring buffers
  * Executes numa_move_pages() directly without coroutine overhead
  */
+/* Linux can leave status slots untouched after partial migration or a global
+ * error. Recover only those slots with a bounded residency query. A destination
+ * observation is not proof that this invocation physically copied the page. */
+static void recover_migration_status(pid_t pid, void **pages, const int *nodes, int *status,
+                                     int count)
+{
+    if (count <= 0) {
+        return;
+    }
+    enum { QUERY_BATCH = 256 };
+    void *pending[QUERY_BATCH];
+    int indices[QUERY_BATCH], observed[QUERY_BATCH];
+    int cursor = 0;
+    while (cursor < count) {
+        int n = 0;
+        while (cursor < count && n < QUERY_BATCH) {
+            if (status[cursor] == INT_MIN) {
+                pending[n] = pages[cursor];
+                indices[n] = cursor;
+                observed[n++] = INT_MIN;
+            }
+            cursor++;
+        }
+        if (n == 0) {
+            continue;
+        }
+        if (numa_move_pages(pid, n, pending, NULL, observed, 0) < 0) {
+            continue;
+        }
+        for (int i = 0; i < n; i++) {
+            int index = indices[i];
+            if (observed[i] == INT_MIN) {
+                continue;
+            }
+            /* A page still outside its requested tier remains retryable. */
+            status[index] = observed[i] >= 0 && observed[i] != nodes[index] ? -EAGAIN : observed[i];
+        }
+    }
+}
+
 /* Dispatch one already-assembled batch via synchronous numa_move_pages. */
 static void mig_dispatch_batch(pact_context_t *ctx, pid_t target_pid, void **pages, int *nodes,
                                int *status, pac_metadata_t **metas, int batch_count)
 {
+    for (int i = 0; i < batch_count; i++) {
+        status[i] = INT_MIN;
+    }
     long result = numa_move_pages(target_pid, batch_count, pages, nodes, status, MPOL_MF_MOVE);
     int errno_val = errno;
+    recover_migration_status(target_pid, pages, nodes, status, batch_count);
     process_migration_batch_results(ctx, metas, status, batch_count, result, errno_val);
 }
 

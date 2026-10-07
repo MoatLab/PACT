@@ -96,3 +96,8 @@ rejection of malformed or overflowing values. It requires no PMU hardware.
 `make -C src test-pool-fallback` injects pool-creation failure and checks that
 heap-backed PAC entries still obey the configured cap. It also checks the
 normal pool path, unlimited mode, skip accounting, and cleanup.
+
+`make -C src test-migration-recovery` checks partial and global migration failures,
+bounded residency queries for untouched status slots, preservation of written
+page errors, and failed or incomplete queries under ASan/UBSan. A destination
+observation does not prove that this migration call physically copied the page.
