@@ -25,8 +25,9 @@ SILO_DIR="${SILO_DIR:-/path/to/silo}"
 UBENCH_DIR="${UBENCH_DIR:-/path/to/microbenchmarks}"
 
 # <name>_rss records the workload's peak resident set size in MB. It is
-# REFERENCE DATA for sizing the fast tier by hand (set memmap = _rss/2 for a
-# 1:1 split; see run/README.md) - run-pact.sh does not read it.
+# REFERENCE DATA for sizing the fast tier by hand (target usable node-0
+# memory = _rss/2 for a 1:1 split; see setup/README.md). The memmap size is
+# memory removed, not memory retained. run-pact.sh does not read _rss.
 #
 # GRAPH GENERATION: the paper's bc-kron uses a Kronecker graph of scale 27,
 # degree 16 (134.2M vertices, 2.11B edges, ~18 GB .sg file, ~19.5 GB RSS).
@@ -36,7 +37,8 @@ UBENCH_DIR="${UBENCH_DIR:-/path/to/microbenchmarks}"
 # different scale (e.g. -g25 for a smaller ~4.5 GB / ~5 GB-RSS graph), re-measure
 # with:
 #     /usr/bin/time -v ./bc -f kron.sg -i1 -n1   # "Maximum resident set size"
-# and update _rss (kbytes/1024 -> MB), then re-size memmap = _rss/2 for 1:1.
+# and update _rss (kbytes/1024 -> MB), then target usable node-0 memory
+# of _rss/2 for 1:1. Recalculate the reservation for your physical layout.
 
 # --- bc_kron_8t : GAP betweenness-centrality on a Kronecker graph, 8 threads
 bc_kron_8t_pname="bc"

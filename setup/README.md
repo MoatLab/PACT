@@ -83,9 +83,12 @@ Measure the workload's RSS first, on an unconstrained boot:
 
 ### Apply memmap
 
-`memmap=<R>G!<off>G` reserves `<R>` GB of DRAM starting at `<off>` GB, removing
-it from node 0. Add it to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`,
-then `sudo update-grub` and reboot.
+`memmap=<R>G!<off>G` marks the physical range starting at `<off>` with length
+`<R>` as protected memory. This removes that range from ordinary RAM; it does
+not set the remaining fast-tier size. Choose a range within node 0 from the
+host's physical memory map. The example below is specific to its host layout.
+Add the parameter to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then
+`sudo update-grub` and reboot.
 
 ```bash
 # c220g5: node 0 is ~95 GB. To leave ~10 GB usable (a 1:1 split for a ~19.5 GB
@@ -96,13 +99,13 @@ sudo update-grub && sudo reboot
 numactl -H | grep -E 'node 0 (size|free)'   # e.g. size 10676 MB, free ~10 GB
 ```
 
-> The exact node-0 size for a given `memmap` varies by ~hundreds of MB each
-> boot and by machine - tune the reserved GB up/down by 1-2 and re-check
-> `numactl -H` until `node 0 free` is close to your target. On a fresh boot the
-> OS holds only ~0.5 GB of node 0, so `node 0 free ~= node 0 size`.
-> **Verified values (c220g5, bc-kron 8t, RSS ~19.5 GB):** `memmap=86G!2G` gives
-> node 0 ~10.7 GB total / ~10 GB free = 1:1. `memmap=76G!2G` gives ~20 GB =
-> the FULL RSS (no split - do not use for a 1:1 experiment).
+Record node-0 total and free memory after reboot and after workload-input
+preload. Free memory also depends on the kernel, services, file cache and
+PACT metadata; it is not identical to total node capacity. Treat the example
+sizes as approximate and verify the workload's actual placement. For comparisons,
+keep the physical reservation and preload procedure fixed across tiering systems,
+and report runtime memory overhead separately. Do not resize node 0 for each
+policy based on its observed residency.
 
 ## Notes
 

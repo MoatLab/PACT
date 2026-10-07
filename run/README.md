@@ -129,7 +129,7 @@ large). Build/obtain each from its upstream source:
   ```
 
   The `bc_kron_8t_rss` value in `workloads.sh` is a reference figure you use to
-  size the fast tier by hand (`memmap` = `_rss`/2 for a 1:1 split); the runner
+  size the fast tier by hand (usable node-0 memory = `_rss`/2 for a 1:1 split); the runner
   does not read it. It assumes this scale-27 graph, so if you generate a
   different scale, re-measure the RSS and update `_rss` (see the comment in
   `workloads.sh`) and your `memmap`.
