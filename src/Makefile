@@ -79,6 +79,10 @@ check-format:
 	$(require_clang_format)
 	$(CLANG_FORMAT) --dry-run -Werror $(FMT_SRCS)
 
+.PHONY: test-event-loop-startup
+test-event-loop-startup:
+	CC="$(CC)" python3 ../tests/test-event-loop-startup.py
+
 .PHONY: test-pebs-startup
 test-pebs-startup:
 	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
@@ -205,4 +209,12 @@ test-pool-fallback:
 	    -fsanitize=undefined -fno-sanitize-recover=all \
 	    ../tests/test-pool-fallback.c error.c obj-pool.c \
 	    -Wl,--gc-sections -Wl,--wrap=pool_create -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-migration-stop
+test-migration-stop:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-migration-stop.c error.c -Wl,--gc-sections -lm -lpthread -o "$$test_bin"; \
 	"$$test_bin"

@@ -75,3 +75,12 @@ jobs:
 
       - name: Literal workload paths
         run: python3 tests/test-workload-paths.py
+
+      - name: Migration worker startup and shutdown
+        run: make -C src test-event-loop-startup test-migration-stop
+
+      - name: Migration worker startup (logging variant)
+        run: PACT_TEST_LOGGING=1 make -C src test-event-loop-startup
+
+      - name: Migration worker shutdown (logging variant)
+        run: make -C src test-migration-stop CC="gcc -DPACT_ENABLE_LOGGING"

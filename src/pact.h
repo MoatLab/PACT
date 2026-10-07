@@ -361,8 +361,9 @@ struct pact_context {
     /* ===== Coroutine scheduling state ===== */
 
     /* ===== Migration Thread ===== */
-    pthread_t migration_thread;             /* Migration thread handle */
-    volatile bool migration_thread_running; /* Thread control flag */
+    pthread_t migration_thread; /* Migration thread handle */
+    /* Shared stop flag; volatile cannot synchronize threads. */
+    _Atomic bool migration_thread_running;
 
     /* CPU affinity configuration */
     int monitor_cpu;   /* CPU for main event loop (-1 = no pinning) */

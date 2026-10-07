@@ -508,27 +508,60 @@ static int mig_drain_workload_ring(pact_context_t *ctx, void **pages, int *nodes
     return wl_migrated;
 }
 
+typedef struct {
+    pact_context_t *ctx;
+    void **pages;
+    int *nodes;
+    int *status;
+    pac_metadata_t **metas;
+} migration_worker_t;
+
+static void free_migration_worker(migration_worker_t *worker)
+{
+    if (!worker) {
+        return;
+    }
+    free(worker->pages);
+    free(worker->nodes);
+    free(worker->status);
+    free(worker->metas);
+    free(worker);
+}
+
+/* Allocate before pthread_create so failure reaches the main startup path. */
+static migration_worker_t *alloc_migration_worker(pact_context_t *ctx)
+{
+    migration_worker_t *worker = calloc(1, sizeof(*worker));
+    if (!worker) {
+        return NULL;
+    }
+    worker->ctx = ctx;
+    size_t count = ctx->max_migrations_per_cycle;
+    worker->pages = malloc(count * sizeof(*worker->pages));
+    worker->nodes = malloc(count * sizeof(*worker->nodes));
+    worker->status = malloc(count * sizeof(*worker->status));
+    worker->metas = malloc(count * sizeof(*worker->metas));
+    if (!worker->pages || !worker->nodes || !worker->status || !worker->metas) {
+        free_migration_worker(worker);
+        return NULL;
+    }
+    return worker;
+}
+
 static void *migration_thread_fn(void *arg)
 {
-    pact_context_t *ctx = (pact_context_t *)arg;
+    migration_worker_t *worker = arg;
+    pact_context_t *ctx = worker->ctx;
 
     if (ctx->migration_cpu >= 0) {
         pact_pin_to_cpu(ctx->migration_cpu);
     }
 
     int max_batch = ctx->max_migrations_per_cycle;
-    void **pages = malloc(max_batch * sizeof(void *));
-    int *nodes = malloc(max_batch * sizeof(int));
-    int *status = malloc(max_batch * sizeof(int));
-    pac_metadata_t **metas = malloc(max_batch * sizeof(pac_metadata_t *));
-    if (!pages || !nodes || !status || !metas) {
-        log_error("migration_thread", "Failed to allocate batch arrays");
-        free(pages);
-        free(nodes);
-        free(status);
-        free(metas);
-        return NULL;
-    }
+    void **pages = worker->pages;
+    int *nodes = worker->nodes;
+    int *status = worker->status;
+    pac_metadata_t **metas = worker->metas;
     log_info("migration_thread", "Started (batch_size=%d)", max_batch);
 
     /* Periodic balance check at ~1Hz. Uses TSC for cadence so it scales
@@ -550,10 +583,7 @@ static void *migration_thread_fn(void *arg)
         }
     }
 
-    free(pages);
-    free(nodes);
-    free(status);
-    free(metas);
+    free_migration_worker(worker);
     log_info("migration_thread", "Migration thread exiting");
     return NULL;
 }
@@ -577,12 +607,25 @@ static int init_migration_thread(pact_context_t *ctx)
         return -1;
     }
 
-    ctx->migration_thread_running = true;
-    if (pthread_create(&ctx->migration_thread, NULL, migration_thread_fn, ctx) != 0) {
-        log_error("init_migration_thread", "Failed to create migration thread: %s",
-                  strerror(errno));
+    migration_worker_t *worker = alloc_migration_worker(ctx);
+    if (!worker) {
+        log_error("init_migration_thread", "Failed to allocate worker batch arrays");
         ring_buffer_migration_entry_destroy(ctx->workload->migration_ring);
         ctx->workload->migration_ring = NULL;
+        return -1;
+    }
+
+    ctx->migration_thread_running = true;
+    int error = pthread_create(&ctx->migration_thread, NULL, migration_thread_fn, worker);
+    if (error != 0) {
+        ctx->migration_thread_running = false;
+        /* pthread_create returns an error number without setting errno. */
+        errno = error;
+        log_error("init_migration_thread", "Failed to create migration thread: %s",
+                  strerror(error));
+        ring_buffer_migration_entry_destroy(ctx->workload->migration_ring);
+        ctx->workload->migration_ring = NULL;
+        free_migration_worker(worker);
         return -1;
     }
     log_info("init_migration_thread", "Migration thread initialized (ring size: %zu)", ring_size);
@@ -830,11 +873,11 @@ static void check_targets_alive(pact_context_t *pact, uint64_t now)
 
 
 /* Main event loop with coroutines */
-static void run_pact_event_loop(pact_context_t *pact)
+static bool run_pact_event_loop(pact_context_t *pact)
 {
     log_info("run_pact_event_loop", "Starting PACT event loop (single-threaded with coroutines)");
     if (!event_loop_init_subsystems(pact)) {
-        return;
+        return false;
     }
     event_loop_log_config(pact);
 
@@ -901,6 +944,7 @@ static void run_pact_event_loop(pact_context_t *pact)
             pact->coroutines[i] = NULL;
         }
     }
+    return true;
 }
 
 /* Initialize per-CPU state arrays from the workload's affinity. */
@@ -1290,7 +1334,7 @@ static void copy_policy_and_intervals(pact_context_t *pact, const pact_config_t 
 
 static void init_migration_and_optimizations(pact_context_t *pact, const pact_config_t *config)
 {
-    pact->migration_thread_running = false;
+    atomic_init(&pact->migration_thread_running, false);
     pact->max_pac_entries = config->pac_pool_max;
     pact->monitor_cpu = config->monitor_cpu;
     pact->migration_cpu = config->migration_cpu;
@@ -1393,7 +1437,7 @@ int main(int argc, char *argv[])
     printf("=== PACT Runtime Mode: Single-threaded Coroutines ===\n");
     printf("Architecture: Lock-free, event-driven, cooperative multitasking\n\n");
 
-    run_pact_event_loop(g_pact);
+    bool event_loop_ok = run_pact_event_loop(g_pact);
 
     printf("\n=== Coroutine Shutdown Sequence ===\n");
     g_pact->running = false;
@@ -1411,7 +1455,7 @@ int main(int argc, char *argv[])
         printf("PACT shutdown complete.\n");
     }
 
-    if (sampling_failed) {
+    if (!event_loop_ok || sampling_failed) {
         return 1;
     }
     pact_signal_write_clean_marker(sig);
