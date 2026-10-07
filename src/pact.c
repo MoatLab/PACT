@@ -13,6 +13,8 @@
 #include <errno.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
+#include <poll.h>
 #include <sys/syscall.h>
 #include <numa.h>
 #include <numaif.h>
@@ -313,6 +315,37 @@ static inline bool should_enter_promotion_pq(pac_metadata_t *meta, binning_state
     return bin && bin_index >= (size_t)(bin->bin_count - 1) && meta->tier == 1;
 }
 
+/* Coalesce a burst after publishing queue entries. The worker acknowledges
+ * before checking the queue again, so a racing enqueue is seen or wakes it. */
+static void wake_migration_worker(pact_context_t *ctx)
+{
+    if (atomic_exchange(&ctx->migration_wake_pending, true)) {
+        return;
+    }
+    uint64_t one = 1;
+    ssize_t result;
+    do {
+        result = write(ctx->migration_wake_fd, &one, sizeof(one));
+    } while (result < 0 && errno == EINTR);
+    if (result < 0 && errno != EAGAIN) {
+        atomic_store(&ctx->migration_error, errno);
+    }
+}
+
+static void consume_migration_wakeup(pact_context_t *ctx)
+{
+    uint64_t count;
+    ssize_t result;
+    do {
+        result = read(ctx->migration_wake_fd, &count, sizeof(count));
+    } while (result < 0 && errno == EINTR);
+    if (result == sizeof(count)) {
+        atomic_exchange(&ctx->migration_wake_pending, false);
+    } else if (result < 0 && errno != EAGAIN) {
+        atomic_store(&ctx->migration_error, errno);
+    }
+}
+
 void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls, uint8_t tier,
                       pid_t pid)
 {
@@ -358,6 +391,7 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
         migration_entry_t entry = {.meta = meta, .target_node = 0};
         if (ring_buffer_migration_entry_push(ring, entry)) {
             atomic_inc_relaxed(&pact->workload->stats.promotion_attempts);
+            wake_migration_worker(pact);
         } else {
             meta->migrating = false; /* ring full — let next sample retry */
         }
@@ -367,8 +401,8 @@ void update_pac_entry(pact_context_t *pact, uint64_t page_addr, uint64_t stalls,
     pact->workload->stats.avg_pac = (pact->workload->stats.avg_pac * 15 + meta->pac_value) >> 4;
 }
 
-/* Migration Thread: busy-waits on the workload's migration ring and
- * dispatches numa_move_pages. */
+/* Migration thread: drains the workload ring and waits for notifications
+ * when idle. Dispatches numa_move_pages synchronously. */
 
 /* Process per-page numa_move_pages results — must be thread-safe vs main thread.
  * Every entry in the migration ring is a promotion (target_node=0); demotion
@@ -579,7 +613,19 @@ static void *migration_thread_fn(void *arg)
         if (ring_buffer_migration_entry_size(ring) > 0) {
             (void)mig_drain_workload_ring(ctx, pages, nodes, status, metas, max_batch);
         } else {
-            _mm_pause(); /* CPU hint vs 100µs kernel sleep */
+            struct pollfd wait_fd = {.fd = ctx->migration_wake_fd, .events = POLLIN};
+            /* Bound idle waits so periodic balancing still runs without work. */
+            int result = poll(&wait_fd, 1, 100);
+            if (result > 0 && (wait_fd.revents & POLLIN)) {
+                consume_migration_wakeup(ctx);
+            } else if (result > 0) {
+                atomic_store(&ctx->migration_error, EIO);
+            } else if (result < 0 && errno != EINTR) {
+                atomic_store(&ctx->migration_error, errno);
+            }
+            if (atomic_load(&ctx->migration_error)) {
+                break;
+            }
         }
     }
 
@@ -615,10 +661,21 @@ static int init_migration_thread(pact_context_t *ctx)
         return -1;
     }
 
+    ctx->migration_wake_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (ctx->migration_wake_fd < 0) {
+        free_migration_worker(worker);
+        ring_buffer_migration_entry_destroy(ctx->workload->migration_ring);
+        ctx->workload->migration_ring = NULL;
+        return -1;
+    }
+    atomic_init(&ctx->migration_wake_pending, false);
+    atomic_init(&ctx->migration_error, 0);
     ctx->migration_thread_running = true;
     int error = pthread_create(&ctx->migration_thread, NULL, migration_thread_fn, worker);
     if (error != 0) {
         ctx->migration_thread_running = false;
+        close(ctx->migration_wake_fd);
+        ctx->migration_wake_fd = -1;
         /* pthread_create returns an error number without setting errno. */
         errno = error;
         log_error("init_migration_thread", "Failed to create migration thread: %s",
@@ -641,9 +698,12 @@ static void cleanup_migration_thread(pact_context_t *ctx)
 
     /* Signal thread to stop */
     ctx->migration_thread_running = false;
+    wake_migration_worker(ctx);
 
     /* Wait for thread to finish */
     pthread_join(ctx->migration_thread, NULL);
+    close(ctx->migration_wake_fd);
+    ctx->migration_wake_fd = -1;
 
     /* Cleanup ring buffer */
     if (ctx->workload->migration_ring) {
@@ -884,6 +944,9 @@ static bool run_pact_event_loop(pact_context_t *pact)
     uint64_t loop_count = 0, total_yields = 0;
 
     while (pact->running) {
+        if (atomic_load(&pact->migration_error)) {
+            break;
+        }
         uint64_t now = rdtsc();
         bool did_work = false;
         loop_count++;
@@ -944,7 +1007,12 @@ static bool run_pact_event_loop(pact_context_t *pact)
             pact->coroutines[i] = NULL;
         }
     }
-    return true;
+    int error = atomic_load(&pact->migration_error);
+    if (error) {
+        log_error("run_pact_event_loop", "Migration worker notification failed: %s",
+                  strerror(error));
+    }
+    return error == 0;
 }
 
 /* Initialize per-CPU state arrays from the workload's affinity. */

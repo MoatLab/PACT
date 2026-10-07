@@ -211,6 +211,24 @@ test-pool-fallback:
 	    -Wl,--gc-sections -Wl,--wrap=pool_create -lm -o "$$test_bin"; \
 	"$$test_bin"
 
+.PHONY: test-migration-wait-stress
+test-migration-wait-stress:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-migration-wait-stress.c error.c -Wl,--gc-sections \
+	    -Wl,--wrap=poll -Wl,--wrap=__poll_chk -lm -lpthread -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-migration-wakeup
+test-migration-wakeup:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-migration-wakeup.c error.c -Wl,--gc-sections \
+	    -Wl,--wrap=read -Wl,--wrap=__read_chk -Wl,--wrap=write -lm -lpthread -o "$$test_bin"; \
+	"$$test_bin"
+
 .PHONY: test-migration-stop
 test-migration-stop:
 	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \

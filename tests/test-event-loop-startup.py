@@ -37,6 +37,15 @@ static int fault, allocations, batch_allocations, creates, joins, running_at_des
 static bool armed;
 static void *(*pending_start)(void *);
 static void *pending_arg;
+int __real_eventfd(unsigned int initial, int flags);
+int __wrap_eventfd(unsigned int initial, int flags)
+{
+    if (fault == -3) {
+        errno = EMFILE;
+        return -1;
+    }
+    return __real_eventfd(initial, flags);
+}
 void *__real_malloc(size_t size);
 void *__wrap_malloc(size_t size)
 {
@@ -70,6 +79,9 @@ int __wrap_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
     pending_start = start;
     pending_arg = arg;
     creates++;
+    if (fault == -4) {
+        atomic_store(&g_pact_ctx->migration_error, EIO);
+    }
     errno = 0;
     return fault == 0 ? EAGAIN : 0;
 }
@@ -124,13 +136,13 @@ with tempfile.TemporaryDirectory(prefix="pact-startup-") as directory:
     command = [os.environ.get("CC", "gcc"), "-Wall", "-Wextra", "-O1", "-g",
                "-D_GNU_SOURCE", "-I" + str(src), "-fsanitize=address,undefined",
                str(source), *sources, "-Wl,--wrap=calloc", "-Wl,--wrap=malloc", "-Wl,--wrap=free",
-               "-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join",
+               "-Wl,--wrap=pthread_create", "-Wl,--wrap=pthread_join", "-Wl,--wrap=eventfd",
                "-lm", "-lnuma", "-lpthread", "-o", str(binary)]
     if logging:
         command.insert(1, "-DPACT_ENABLE_LOGGING")
     subprocess.run(command, check=True)
     failures = []
-    for fault in (0, 1, 2, 3, 4, 5, 10, 11, 12, 13, -1, -2):
+    for fault in (0, 1, 2, 3, 4, 5, 10, 11, 12, 13, -1, -2, -3, -4):
         marker = work / f"marker-{fault}"
         run = subprocess.run([str(binary), str(fault), str(marker)],
                              capture_output=True, text=True, timeout=10)
@@ -144,8 +156,8 @@ with tempfile.TemporaryDirectory(prefix="pact-startup-") as directory:
             errors.append("incorrect clean marker")
         if "running_at_destroy=0" not in run.stdout:
             errors.append("incorrect worker state at destruction")
-        expected_creates = int(fault <= 0)
-        expected_joins = int(fault < 0)
+        expected_creates = int(fault <= 0 and fault != -3)
+        expected_joins = int(fault < 0 and fault != -3)
         if f"creates={expected_creates} joins={expected_joins}" not in run.stdout:
             errors.append("incorrect worker ownership")
         if fault == 0 and os.strerror(errno.EAGAIN) not in run.stderr:

@@ -364,6 +364,9 @@ struct pact_context {
     pthread_t migration_thread; /* Migration thread handle */
     /* Shared stop flag; volatile cannot synchronize threads. */
     _Atomic bool migration_thread_running;
+    int migration_wake_fd;
+    _Atomic bool migration_wake_pending;
+    _Atomic int migration_error;
 
     /* CPU affinity configuration */
     int monitor_cpu;   /* CPU for main event loop (-1 = no pinning) */

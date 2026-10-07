@@ -79,6 +79,7 @@ int main(void)
             metadata[page].migrating = true;
             migration_entry_t entry = {.meta = &metadata[page], .target_node = 0};
             assert(ring_buffer_migration_entry_push(wl.migration_ring, entry));
+            wake_migration_worker(&ctx);
         }
         while (atomic_load(&processed) < 4) {
             sched_yield();
