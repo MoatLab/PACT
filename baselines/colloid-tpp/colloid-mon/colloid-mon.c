@@ -19,7 +19,7 @@
 extern int colloid_local_lat_gt_remote;
 extern int colloid_nid_of_interest;
 
-#define CORE_MON 9
+#define CORE_MON 1
 #define LOCAL_NUMA 0
 #define WORKER_BUDGET 1000000
 #define LOG_SIZE 10000
@@ -189,19 +189,17 @@ void thread_fun_poll_cha(struct work_struct *work)
         cha_1_delta_tsc = cur_ctr_tsc[1][0] - prev_ctr_tsc[1][0];
         cha_1_clockticks = cur_ctr_val[1][2] - prev_ctr_val[1][2];
 
-        /* you want smoothing? smooth all you want, colloid */
         WRITE_ONCE(smoothed_occ_local, (cha_0_cur_occ + ((1 << EWMA_EXP) - 1) * smoothed_occ_local) >> EWMA_EXP);
         WRITE_ONCE(smoothed_inserts_local, (cha_0_cur_inserts + ((1 << EWMA_EXP) - 1) * smoothed_inserts_local) >> EWMA_EXP);
-        cha_0_lat = (smoothed_inserts_local > 0) ? (smoothed_occ_local / smoothed_inserts_local) * (cha_0_delta_tsc * 1000 / frequency) / (cha_0_clockticks) : (MIN_LOCAL_LAT);
+        cha_0_lat = (smoothed_inserts_local > 0 && cha_0_clockticks > 0) ? (smoothed_occ_local / smoothed_inserts_local) * (cha_0_delta_tsc * 1000 / frequency) / (cha_0_clockticks) : (MIN_LOCAL_LAT);
 
         WRITE_ONCE(smoothed_occ_remote, (cha_1_cur_occ + ((1 << EWMA_EXP) - 1) * smoothed_occ_remote) >> EWMA_EXP);
         WRITE_ONCE(smoothed_inserts_remote, (cha_1_cur_inserts + ((1 << EWMA_EXP) - 1) * smoothed_inserts_remote) >> EWMA_EXP);
-        cha_1_lat = (smoothed_inserts_remote > 0) ? (smoothed_occ_remote / smoothed_inserts_remote) * (cha_1_delta_tsc * 1000 / frequency) / (cha_1_clockticks) : (MIN_REMOTE_LAT);
+        cha_1_lat = (smoothed_inserts_remote > 0 && cha_1_clockticks > 0) ? (smoothed_occ_remote / smoothed_inserts_remote) * (cha_1_delta_tsc * 1000 / frequency) / (cha_1_clockticks) : (MIN_REMOTE_LAT);
 
         WRITE_ONCE(smoothed_lat_local, (cha_0_lat > MIN_LOCAL_LAT) ? (cha_0_lat) : (MIN_LOCAL_LAT));
         WRITE_ONCE(smoothed_lat_remote, (cha_1_lat > MIN_REMOTE_LAT) ? (cha_1_lat) : (MIN_REMOTE_LAT));
 
-        /* the only metric that colloid actually uses */
         WRITE_ONCE(colloid_local_lat_gt_remote, (smoothed_lat_local > smoothed_lat_remote));
 
         /* store the time interval */

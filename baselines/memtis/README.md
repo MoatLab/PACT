@@ -10,6 +10,7 @@ This folder builds the Memtis kernel used as a baseline in PACT evaluation. Memt
 |------|---------|
 | `setup_memtis.sh` | One-shot build script - clone, patch, configure, compile |
 | `memtis.patch` | Memtis patch applied to clean Linux v5.15.19 |
+| `memtis-vmstat.patch`, `memtis-pte-allocation.patch` | Build patches applied after `memtis.patch` (see [Build patches](#build-patches)) |
 | `config` | Base `.config` used as the starting configuration |
 
 ---
@@ -49,10 +50,13 @@ sudo ./setup_memtis.sh   # checks out tag v5.15.19
 The script will:
 1. Clone `linux-stable` at tag `v5.15.19` into `linux/`
 2. Apply `memtis.patch` (sets `EXTRAVERSION = -htmm`)
-3. Copy `config` as the base `.config`
-4. Run `make olddefconfig` to resolve any new symbols
-5. Force `CONFIG_INTEL_UNCORE_FREQ_CONTROL=y` (built-in `*`)
-6. Build with `make -j$(nproc)`
+3. Apply `memtis-vmstat.patch` and `memtis-pte-allocation.patch`
+4. Apply the shared host-tool fix with `../common/apply-build-fixes.sh`
+   (see [`../README.md`](../README.md))
+5. Copy `config` as the base `.config`
+6. Run `make olddefconfig` to resolve any new symbols
+7. Force `CONFIG_INTEL_UNCORE_FREQ_CONTROL=y` (built-in `*`)
+8. Build with `make -j$(nproc)`
 
 If the repo is already present the clone step is skipped automatically.
 
@@ -73,30 +77,13 @@ uname -r
 # expected: 5.15.19-htmm
 ```
 
-## Build corrections
+## Build patches
 
-The setup script applies `memtis-vmstat.patch` after the original Memtis patch.
-It makes HTMM counter names independent of memory-balloon support, matching
-the counter enums and allowing builds with `CONFIG_MEMORY_BALLOON=n`. The
-shared host-tool fix described in [`../README.md`](../README.md) also enables
-compilation with newer GCC versions. Neither correction changes placement
-policy. Local compilation does not establish boot or workload performance.
-
-## Page-table allocation failure
-
-The setup script also applies `memtis-pte-allocation.patch`. When page-table
-allocation fails, Memtis now returns `NULL` to the caller without attempting
-metadata initialization through the null pointer. Successful allocations and
-placement policy are unchanged.
-
-From the repository root, run the allocation regression after applying the
-patches to the kernel source:
+`memtis-vmstat.patch` makes the build work without memory-balloon support.
+`memtis-pte-allocation.patch` checks the result of a page-table allocation
+before Memtis uses it. To test the second patch, run from the repository
+root after applying the patches:
 
 ```sh
 python3 tests/test-memtis-pte-allocation.py baselines/memtis/linux/arch/x86/mm/pgtable.c
 ```
-
-The test compiles the actual allocation functions with GCC and UBSan. It checks
-page-table and metadata-allocation failures with HTMM compiled in and out.
-These injected allocator tests do not force allocation failure in a running
-kernel or establish workload performance.

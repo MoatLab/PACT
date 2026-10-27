@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 /*
- * pact_logging.h - Optional logging infrastructure for PACT
+ * logging.h - Optional logging infrastructure for PACT
  *
  * This header provides compile-time and runtime control over logging to minimize
  * performance impact. When PACT_ENABLE_LOGGING is not defined, all logging functions
@@ -60,16 +60,8 @@ void log_ring_buffer_op(pact_context_t *pact, const char *function, const char *
                         size_t capacity);
 void log_workload_info(pact_context_t *pact, const char *function, int workload_id, pid_t pid,
                        const char *name, const char *cores);
-void log_migration_stats(pact_context_t *pact, const char *function, int workload_id,
-                         uint64_t new_promotions, uint64_t new_demotions,
-                         uint64_t avg_promotion_pac, uint64_t avg_demotion_pac,
-                         uint64_t repromotions_pact_pact, uint64_t repromotions_pact_other,
-                         uint64_t repromotions_other_pact, uint64_t repromotions_other_other,
-                         uint64_t redemotions_pact_pact, uint64_t redemotions_pact_other,
-                         uint64_t redemotions_other_pact, uint64_t redemotions_other_other);
-void log_pmu(pact_context_t *pact, const char *function, int workload_id, double fast_tier_mlp,
-             double slow_tier_mlp, uint64_t llc_misses_fast, uint64_t llc_misses_slow,
-             uint64_t fast_tier_events, uint64_t slow_tier_events);
+void log_pmu(pact_context_t *pact, const char *function, int workload_id, double slow_tier_mlp,
+             uint64_t llc_misses_slow, uint64_t slow_tier_events);
 void log_pac_update(pact_context_t *pact, const char *function, int workload_id, uint64_t page_addr,
                     uint64_t pac_value, const char *tier_str, int bin_index);
 void log_migration_event(pact_context_t *pact, const char *function, int workload_id,
@@ -128,21 +120,9 @@ static inline void log_workload_info(pact_context_t *pact PACT_UNUSED,
                                      const char *cores PACT_UNUSED)
 {}
 
-static inline void log_migration_stats(
-    pact_context_t *pact PACT_UNUSED, const char *function PACT_UNUSED, int workload_id PACT_UNUSED,
-    uint64_t new_promotions PACT_UNUSED, uint64_t new_demotions PACT_UNUSED,
-    uint64_t avg_promotion_pac PACT_UNUSED, uint64_t avg_demotion_pac PACT_UNUSED,
-    uint64_t repromotions_pact_pact PACT_UNUSED, uint64_t repromotions_pact_other PACT_UNUSED,
-    uint64_t repromotions_other_pact PACT_UNUSED, uint64_t repromotions_other_other PACT_UNUSED,
-    uint64_t redemotions_pact_pact PACT_UNUSED, uint64_t redemotions_pact_other PACT_UNUSED,
-    uint64_t redemotions_other_pact PACT_UNUSED, uint64_t redemotions_other_other PACT_UNUSED)
-{}
-
 static inline void log_pmu(pact_context_t *pact PACT_UNUSED, const char *function PACT_UNUSED,
-                           int workload_id PACT_UNUSED, double fast_tier_mlp PACT_UNUSED,
-                           double slow_tier_mlp PACT_UNUSED, uint64_t llc_misses_fast PACT_UNUSED,
+                           int workload_id PACT_UNUSED, double slow_tier_mlp PACT_UNUSED,
                            uint64_t llc_misses_slow PACT_UNUSED,
-                           uint64_t fast_tier_events PACT_UNUSED,
                            uint64_t slow_tier_events PACT_UNUSED)
 {}
 

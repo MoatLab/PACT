@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build the Soar/Alto baseline kernel: Linux v6.3 + colloid-skx.patch + colloid-skx-alto.patch.
+# Build the Soar/Alto baseline kernel: Linux v6.3 + colloid-skx.patch +
+# colloid-skx-alto.patch + ../common/colloid-build.patch.
 # Expects a Linux git checkout at ./linux (clone it there first; not bundled).
 # See README.md and the upstream repo (github.com/MoatLab/SoarAlto) for the full system.
 set -euo pipefail

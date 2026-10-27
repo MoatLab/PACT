@@ -26,24 +26,29 @@ static void check(uint64_t score, double width, size_t bins, bool expected)
     double samples[100] = {0};
     reservoir_t reservoir = {.samples = samples, .capacity = 100};
     binning_state_t bin = {.bin_count = bins, .bin_width = width};
-    pact_workload_t wl = {.reservoir = &reservoir, .binning = &bin};
-    wl.pac_table = pac_table_init();
-    wl.migration_ring = ring_buffer_migration_entry_create(8);
-    assert(wl.migration_ring);
-    pact_context_t ctx = {.workload = &wl, .cooling_alpha = 1};
+    pac_domain_t domain = {.reservoir = &reservoir, .binning = &bin};
+    domain.table = pac_table_init();
+    domain.migration_ring = ring_buffer_migration_entry_create(8);
+    assert(domain.migration_ring);
+    pact_workload_t wl = {.target_pid = 123};
+    pact_context_t ctx = {.workloads = &wl,
+                          .nr_workloads = 1,
+                          .domains = &domain,
+                          .nr_domains = 1,
+                          .cooling_alpha = 1};
     init_pac_metadata_pool(&ctx);
-    update_pac_entry(&ctx, 4096, score, 1, 123);
-    size_t admitted = ring_buffer_migration_entry_size(wl.migration_ring);
+    update_pac_entry(&ctx, 0, 4096, score, 1);
+    size_t admitted = ring_buffer_migration_entry_size(domain.migration_ring);
     assert(admitted == (size_t)expected);
-    log_one_workload_pac_dist(&wl);
+    log_one_domain_pac_dist(&domain, "WL");
     double threshold;
     unsigned above;
     char *field = strstr(captured, "threshold=");
     assert(field && sscanf(field, "threshold=%lf above_thresh=%u", &threshold, &above) == 2);
     assert(above == admitted);
     assert(threshold == width * (bins - 1));
-    ring_buffer_migration_entry_destroy(wl.migration_ring);
-    pac_table_destroy(wl.pac_table);
+    ring_buffer_migration_entry_destroy(domain.migration_ring);
+    pac_table_destroy(domain.table);
     pool_destroy(ctx.pac_metadata_pool);
 }
 

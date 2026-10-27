@@ -29,20 +29,17 @@ pebs_aggregator_t *pebs_aggregator_create(per_cpu_state_t *cpu_states, int num_c
  * Aggregate PEBS events from all CPUs and push directly to PAC update ring
  * @agg: Aggregator context
  * @ctx: PACT context (for pac_update_ring)
- * @fast_stalls: Fast tier attributed stalls (workload-scoped)
- * @slow_stalls: Slow tier attributed stalls (workload-scoped)
  * @return: Number of events pushed to pac_update_ring, or -1 on error
  */
 int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx);
 
 /*
- * PEBS aggregator coroutine
- * Replaces single-CPU PEBS coroutine in unified architecture
+ * PEBS aggregator coroutine: one sampling window per tick, all CPUs
  */
 void pebs_aggregator_coroutine(mco_coro *co);
 
 /*
- * Setup PEBS aggregator for unified context
+ * Setup PEBS aggregator for the PACT context
  * @ctx: PACT context to initialize
  * @cpu_states: Array of per-CPU PEBS states
  * @num_cpus: Number of CPUs

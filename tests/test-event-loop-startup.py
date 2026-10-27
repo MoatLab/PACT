@@ -100,14 +100,19 @@ static void fixture_setup(int argc, char **argv)
     fault = atoi(argv[1]);
     g_pact_ctx = calloc(1, sizeof(*g_pact_ctx));
     assert(g_pact_ctx);
-    g_pact_ctx->workload = calloc(1, sizeof(*g_pact_ctx->workload));
-    assert(g_pact_ctx->workload);
-    g_pact_ctx->workload->pac_table = pac_table_init();
-    g_pact_ctx->workload->binning = calloc(1, sizeof(*g_pact_ctx->workload->binning));
-    assert(g_pact_ctx->workload->pac_table && g_pact_ctx->workload->binning);
-    g_pact_ctx->monitor_cpu = -1;
-    g_pact_ctx->migration_cpu = -1;
-    g_pact_ctx->target_pidfd = -1;
+    g_pact_ctx->workloads = calloc(1, sizeof(*g_pact_ctx->workloads));
+    assert(g_pact_ctx->workloads);
+    g_pact_ctx->nr_workloads = 1;
+    g_pact_ctx->workloads[0].pidfd = -1;
+    g_pact_ctx->domains = calloc(1, sizeof(*g_pact_ctx->domains));
+    assert(g_pact_ctx->domains);
+    g_pact_ctx->nr_domains = 1;
+    g_pact_ctx->domains[0].table = pac_table_init();
+    g_pact_ctx->domains[0].binning = calloc(1, sizeof(*g_pact_ctx->domains[0].binning));
+    assert(g_pact_ctx->domains[0].table && g_pact_ctx->domains[0].binning);
+    /* -5 and -6: a pin to a CPU that does not exist fails. */
+    g_pact_ctx->monitor_cpu = fault == -5 ? CPU_SETSIZE - 1 : -1;
+    g_pact_ctx->migration_cpu = fault == -6 ? CPU_SETSIZE - 1 : -1;
     g_pact_ctx->max_migrations_per_cycle = 32;
     g_pact_ctx->tsc_freq_hz = 1000000000;
     g_pact_ctx->sampling_failed = fault == -2;
@@ -131,7 +136,8 @@ with tempfile.TemporaryDirectory(prefix="pact-startup-") as directory:
     binary = work / "fixture"
     source.write_text(fixture)
     logging = os.environ.get("PACT_TEST_LOGGING") == "1"
-    excluded = ("pact.c",) if logging else ("pact.c", "logging.c")
+    # diag.c belongs to the `make DIAG=1` build only.
+    excluded = ("pact.c", "diag.c") if logging else ("pact.c", "logging.c", "diag.c")
     sources = sorted(str(p) for p in src.glob("*.c") if p.name not in excluded)
     command = [os.environ.get("CC", "gcc"), "-Wall", "-Wextra", "-O1", "-g",
                "-D_GNU_SOURCE", "-I" + str(src), "-fsanitize=address,undefined",
@@ -142,7 +148,7 @@ with tempfile.TemporaryDirectory(prefix="pact-startup-") as directory:
         command.insert(1, "-DPACT_ENABLE_LOGGING")
     subprocess.run(command, check=True)
     failures = []
-    for fault in (0, 1, 2, 3, 4, 5, 10, 11, 12, 13, -1, -2, -3, -4):
+    for fault in (0, 1, 2, 3, 4, 5, 10, 11, 12, 13, -1, -2, -3, -4, -5, -6):
         marker = work / f"marker-{fault}"
         run = subprocess.run([str(binary), str(fault), str(marker)],
                              capture_output=True, text=True, timeout=10)
@@ -156,12 +162,14 @@ with tempfile.TemporaryDirectory(prefix="pact-startup-") as directory:
             errors.append("incorrect clean marker")
         if "running_at_destroy=0" not in run.stdout:
             errors.append("incorrect worker state at destruction")
-        expected_creates = int(fault <= 0 and fault != -3)
-        expected_joins = int(fault < 0 and fault != -3)
+        expected_creates = int(fault <= 0 and fault not in (-3, -5))
+        expected_joins = int(fault < 0 and fault not in (-3, -5))
         if f"creates={expected_creates} joins={expected_joins}" not in run.stdout:
             errors.append("incorrect worker ownership")
         if fault == 0 and os.strerror(errno.EAGAIN) not in run.stderr:
             errors.append("missing pthread error")
+        if fault in (-5, -6) and "Failed to set affinity" not in run.stderr:
+            errors.append("missing pin error")
         if "ERROR: AddressSanitizer" in run.stderr or "runtime error:" in run.stderr:
             errors.append("sanitizer failure")
         if errors:

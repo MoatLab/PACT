@@ -52,25 +52,60 @@ int __wrap_sched_getaffinity(pid_t pid, size_t size, cpu_set_t *mask)
     CPU_SET(0, mask);
     return 0;
 }
+/* The per-CPU state fills no entry when its calloc fails: these stand in
+ * for perf.c, pmu.c and pmu-platform.c, which are not linked. */
+pmu_platform_t g_pmu_platform;
+void init_per_cpu_state(per_cpu_state_t *cs)
+{
+    (void)cs;
+}
+void close_cpu_counting_group(per_cpu_state_t *cs)
+{
+    (void)cs;
+}
+
+/* Mode 1: a failed calloc of the per-CPU state is an error, and the
+ * teardown takes the NULL array. */
+static int check_cpu_states(void)
+{
+    int cpus[2] = {0, 1};
+    pact_context_t ctx = {0};
+    ctx.all_cpus = cpus;
+    ctx.nr_all_cpus = 2;
+    armed = true;
+    int rc = init_cpu_states(&ctx);
+    assert((fail_at == 1) == (rc < 0) && (rc < 0) == (ctx.cpu_states == NULL));
+    destroy_per_cpu_pebs(&ctx);
+    armed = false;
+    assert(!ctx.cpu_states);
+    printf("CPU_STATES_RESULT rc=%d\n", rc);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     assert(argc == 3);
     fail_at = strtoul(argv[1], NULL, 10);
     pact_config_t config;
     pact_init_config(&config);
-    config.target_pid = getpid();
-    assert(atoi(argv[2]) == 0);
-    pact_context_t ctx = {0};
+    config.nr_workloads = 1;
+    config.workloads[0].pid = getpid();
+    int mode = atoi(argv[2]);
+    assert(mode == 0 || mode == 1);
     set_log_level(LOG_LEVEL_ERROR);
+    if (mode == 1) {
+        return check_cpu_states();
+    }
+    pact_context_t ctx = {0};
     armed = true;
     int rc = initialize_workloads(&ctx, &config);
     if (!rc) {
-        assert(ctx.workload && ctx.workload->pac_table && ctx.workload->reservoir &&
-               ctx.workload->binning);
+        assert(ctx.workloads && ctx.nr_domains == 1 && ctx.domains[0].table &&
+               ctx.domains[0].reservoir && ctx.domains[0].binning);
 
-        destroy_per_workload_data(&ctx);
-        free(ctx.workload->target_cpus);
-        free(ctx.workload);
+        destroy_domains(&ctx);
+        free(ctx.workloads[0].target_cpus);
+        free(ctx.workloads);
         free(ctx.all_cpus);
     }
     armed = false;

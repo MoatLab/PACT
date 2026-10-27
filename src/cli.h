@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
-/* cli.h — argv parsing for PACT runtime.
+/* cli.h: argv parsing for PACT runtime.
  *
- * the CLI module: pact_config, pact_usage, pact_validate, pact_cli).
+ * CLI module: config.c, usage.c, validate.c, cli.c.
  */
 
 #ifndef PACT_CLI_H

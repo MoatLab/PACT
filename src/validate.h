@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
-/* validate.h — CLI configuration sanity checks. */
+/* validate.h: CLI configuration sanity checks. */
 
 #ifndef PACT_VALIDATE_H
 #define PACT_VALIDATE_H

@@ -20,23 +20,25 @@ static void check_limit(const char *text, size_t expected)
 {
     pact_config_t config;
     pact_init_config(&config);
-    config.target_pid = getpid();
+    config.nr_workloads = 1;
+    config.workloads[0].pid = getpid();
     char *args[] = {"pact", "--pac-pool-max", (char *)text};
     assert(pact_parse_command_line_args(3, args, &config) == 0);
     assert(config.pac_pool_max == expected);
-    pact_workload_t workload = {0};
-    pact_context_t context = {.max_pac_entries = config.pac_pool_max, .workload = &workload};
+    pac_domain_t domain = {0};
+    pact_context_t context = {.max_pac_entries = config.pac_pool_max};
     init_pac_metadata_pool(&context);
     assert(context.pac_metadata_pool && context.max_pac_entries == expected);
-    pac_metadata_t *first = alloc_pac_metadata(&context);
-    pac_metadata_t *second = alloc_pac_metadata(&context);
+    pac_metadata_t *first = alloc_pac_metadata(&context, &domain);
+    pac_metadata_t *second = alloc_pac_metadata(&context, &domain);
     assert(first);
     assert((second != NULL) == (expected != 1));
-    assert(workload.stats.pool_alloc_skipped == (expected == 1));
-    free_pac_metadata(&context, first);
+    assert(context.stats.pool_alloc_skipped == (expected == 1));
+    free_pac_metadata(&context, &domain, first);
     if (second) {
-        free_pac_metadata(&context, second);
+        free_pac_metadata(&context, &domain, second);
     }
+    assert(domain.nr_metadata == 0);
     pool_destroy(context.pac_metadata_pool);
 }
 
@@ -45,8 +47,7 @@ int main(void)
     set_log_level(LOG_LEVEL_ERROR);
     pact_config_t config;
     pact_init_config(&config);
-    config.target_pid = getpid();
-    assert(config.pac_pool_max == PACT_DEFAULT_PAC_POOL_MAX);
+    assert(config.pac_pool_max == PACT_DEFAULT_PAC_POOL_MAX && PACT_DEFAULT_PAC_POOL_MAX == 0);
     check_limit("0", 0);
     check_limit("1", 1);
     check_limit("2097152", 2097152);
@@ -66,7 +67,8 @@ int main(void)
                              "99999999999999999999999999999"};
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
         pact_init_config(&config);
-        config.target_pid = getpid();
+        config.nr_workloads = 1;
+        config.workloads[0].pid = getpid();
         char *args[] = {"pact", "--pac-pool-max", (char *)invalid[i]};
         assert(pact_parse_command_line_args(3, args, &config) == -1);
         assert(config.pac_pool_max == PACT_DEFAULT_PAC_POOL_MAX);

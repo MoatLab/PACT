@@ -20,20 +20,20 @@ int main(void)
 {
     log_info_fn = capture;
     binning_state_t bin = {.bin_width = 100, .bin_count = 10};
-    pact_workload_t wl = {.binning = &bin};
-    wl.pac_table = pac_table_init();
-    log_one_workload_pac_dist(&wl);
+    pac_domain_t domain = {.binning = &bin};
+    domain.table = pac_table_init();
+    log_one_domain_pac_dist(&domain, "WL");
     assert(calls == 0);
     pac_metadata_t entries[4] = {0};
     for (int i = 0; i < 4; i++) {
         entries[i].pac_value = UINT64_MAX - (i % 2) * 2;
         entries[i].tier = i / 2;
         int absent;
-        khint_t k = pac_table_put(wl.pac_table, (i + 1) * 4096, &absent);
+        khint_t k = pac_table_put(domain.table, (i + 1) * 4096, &absent);
         assert(absent == 1);
-        kh_val(wl.pac_table, k) = &entries[i];
+        kh_val(domain.table, k) = &entries[i];
     }
-    log_one_workload_pac_dist(&wl);
+    log_one_domain_pac_dist(&domain, "WL");
     unsigned int n, above, fast_n, slow_n;
     uint64_t minimum, average, maximum, fast_average, slow_average;
     double threshold;
@@ -52,7 +52,7 @@ int main(void)
             entries[i].pac_value = 100 + i * 100;
             entries[i].tier = tier;
         }
-        log_one_workload_pac_dist(&wl);
+        log_one_domain_pac_dist(&domain, "WL");
         assert(sscanf(captured,
                       " WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%lf above_thresh=%u "
                       "fast(n=%u avg=%lu) slow(n=%u avg=%lu)",
@@ -63,5 +63,5 @@ int main(void)
         assert(fast_average == (tier == 0 ? 250 : 0));
         assert(slow_average == (tier == 1 ? 250 : 0));
     }
-    pac_table_destroy(wl.pac_table);
+    pac_table_destroy(domain.table);
 }

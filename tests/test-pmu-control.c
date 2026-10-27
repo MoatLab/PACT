@@ -18,7 +18,7 @@ int fake_ioctl(int fd, unsigned long request, ...)
     va_start(args, request);
     assert(va_arg(args, int) == PERF_IOC_FLAG_GROUP);
     va_end(args);
-    if (request == PERF_EVENT_IOC_DISABLE && fd >= 10 && fd <= 14) {
+    if (request == PERF_EVENT_IOC_DISABLE && fd >= 10 && fd <= 13) {
         disabled |= 1u << (fd - 10);
     }
     if (fd == failed_fd && request == failed_request) {
@@ -29,22 +29,25 @@ int fake_ioctl(int fd, unsigned long request, ...)
 }
 int main(void)
 {
-    per_cpu_state_t cpus[3] = {{.leader.fd = 10}, {.leader.fd = 13}, {.leader.fd = -1}};
-    thread_perf_t thread = {.tid = 123, .leader.fd = 14};
-    pact_workload_t workload = {.nr_cha = 1, .nr_threads = 1, .threads = &thread};
-    workload.cha_pmus[0].group_fast.fds[0] = 11;
-    workload.cha_pmus[0].group_slow.fds[0] = 12;
-    pact_context_t ctx = {
-        .cpu_states = cpus, .nr_all_cpus = 3, .workload = &workload, .running = true};
+    per_cpu_state_t cpus[3] = {{.leader.fd = 10}, {.leader.fd = 12}, {.leader.fd = -1}};
+    thread_perf_t thread = {.tid = 123, .leader.fd = 13};
+    pact_workload_t workload = {.nr_threads = 1, .threads = &thread};
+    pact_context_t ctx = {.cpu_states = cpus,
+                          .nr_all_cpus = 3,
+                          .workloads = &workload,
+                          .nr_workloads = 1,
+                          .nr_cha = 1,
+                          .running = true};
+    ctx.cha_pmus[0].group.fds[0] = 11;
     failed_fd = -1;
     start_pmu_perf_events(&ctx);
     assert(!ctx.sampling_failed && ctx.running && !disabled);
     stop_pmu_perf_events(&ctx);
-    assert(!ctx.sampling_failed && ctx.running && disabled == 31);
+    assert(!ctx.sampling_failed && ctx.running && disabled == 15);
     unsigned long requests[] = {PERF_EVENT_IOC_RESET, PERF_EVENT_IOC_ENABLE,
                                 PERF_EVENT_IOC_DISABLE};
     for (size_t i = 0; i < sizeof(requests) / sizeof(requests[0]); i++) {
-        for (int fd = 10; fd <= 14; fd++) {
+        for (int fd = 10; fd <= 13; fd++) {
             ctx.sampling_failed = false;
             ctx.running = true;
             disabled = 0;
@@ -56,7 +59,28 @@ int main(void)
                 start_pmu_perf_events(&ctx);
             }
             assert(ctx.sampling_failed && !ctx.running);
-            assert(disabled == 31); /* A failure cannot skip later cleanup groups. */
+            assert(disabled == 15); /* A failure cannot skip later cleanup groups. */
         }
     }
+
+    /* Tierce mode: CHA (fd 11) stops; PEBS (fds 10, 12) is flushed and
+     * re-enabled, never reset. A failure still stops every group. */
+    per_cpu_state_t tcpus[3] = {{.leader.fd = 10, .count_leader.fd = -1},
+                                {.leader.fd = 12, .count_leader.fd = -1},
+                                {.leader.fd = -1, .count_leader.fd = -1}};
+    ctx.cpu_states = tcpus;
+    ctx.mode = PACT_MODE_TIERCE;
+    ctx.sampling_failed = false;
+    ctx.running = true;
+    disabled = 0;
+    failed_fd = 10;
+    failed_request = PERF_EVENT_IOC_RESET;
+    start_pmu_perf_events(&ctx);
+    assert(!ctx.sampling_failed && ctx.running); /* no reset reached fd 10 */
+    stop_pmu_perf_events(&ctx);
+    assert(!ctx.sampling_failed && ctx.running && disabled == 7);
+    disabled = 0;
+    failed_request = PERF_EVENT_IOC_ENABLE;
+    start_pmu_perf_events(&ctx);
+    assert(ctx.sampling_failed && !ctx.running && disabled == 7);
 }

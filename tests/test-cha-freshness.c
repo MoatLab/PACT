@@ -66,26 +66,34 @@ int main(void)
     assert(read_pmu_event_group(&group) < 0);
     assert(!group.read_valid && !group.values[0]);
 
-    pact_workload_t workload = {.nr_cha = 2, .counters_valid = true};
-    cha_pmu_info_t *chas = workload.cha_pmus;
+    pact_context_t ctx = {.nr_cha = 2, .global_mlp = 3.0};
+    cha_pmu_info_t *chas = ctx.cha_pmus;
     g_pmu_platform.mlp_min = 1;
     g_pmu_platform.mlp_max = 32;
     enabled = running = 8000000;
     group = (event_group_t){.counters_used = 2, .fds = {1, 2}, .ids = {11, 12}};
     assert(read_pmu_event_group(&group) == 0);
     for (int i = 0; i < 2; i++) {
-        chas[i].group_fast = chas[i].group_slow = group;
+        chas[i].group = group;
     }
-    calculate_workload_mlp(&workload);
-    assert(workload.counters_valid && workload.workload_mlp_fast == 2.0);
-    assert(workload.workload_mlp_slow == 2.0);
-    /* One stale group must invalidate the entire attribution window. */
-    chas[1].group_fast.read_valid = false;
-    calculate_workload_mlp(&workload);
-    assert(!workload.counters_valid);
-    chas[1].group_fast = group;
-    chas[1].group_slow.time_running = chas[1].group_slow.last_time_running + 500000;
-    workload.counters_valid = true;
-    calculate_workload_mlp(&workload);
-    assert(!workload.counters_valid);
+    calculate_global_mlp(&ctx);
+    assert(ctx.global_mlp == 2.0);
+    /* A stale group leaves the ratio; the fresh CHAs still measure it. */
+    chas[1].group.read_valid = false;
+    chas[0].group.values[CHA_TOR_OCCUPANCY] = 300;
+    calculate_global_mlp(&ctx);
+    assert(ctx.global_mlp == 6.0);
+    /* No fresh CHA: the previous value stays (no measurement is not zero). */
+    chas[0].group.time_running = chas[0].group.last_time_running + 500000;
+    calculate_global_mlp(&ctx);
+    assert(ctx.global_mlp == 6.0);
+    /* A measured window without slow-tier traffic gets mlp_min. */
+    chas[0].group = group;
+    chas[0].group.values[CHA_TOR_OCCUPANCY] = 0;
+    calculate_global_mlp(&ctx);
+    assert(ctx.global_mlp == 1.0);
+    /* Multiplexed LLC-miss windows are scaled by enabled/running time. */
+    assert(scale_window_count(100, 4000, 1000) == 400);
+    assert(scale_window_count(100, 1000, 1000) == 100);
+    assert(scale_window_count(100, 1000, 0) == 100);
 }

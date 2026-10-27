@@ -2,14 +2,15 @@
 
 PACT is a **research prototype**, not production-hardened software. It runs as
 root, programs hardware performance counters (PEBS/uncore), loads out-of-tree
-kernel modules, edits the bootloader configuration, and changes machine-wide
+kernel modules, installs kernels (the baseline build scripts run
+`make install` and `update-grub`), and changes machine-wide
 settings (NUMA demotion, THP, CPU online state, uncore frequency). Run it only
 on a **dedicated or recoverable test machine** with console access, never on a
 shared or production host.
 
 ## Supported versions
 
-Security fixes, if any, are applied on the default branch and to the most
+Security fixes are applied on the default branch and to the most
 recent tagged release. There is no long-term-support branch and no response-time
 guarantee.
 
@@ -21,8 +22,7 @@ public issue:
 - Huaicheng Li — huaicheng@vt.edu
 
 Include what you observed, how to reproduce it, and the affected revision
-(`./src/pact --version`). We will acknowledge the report and coordinate a fix as
-time permits; this is academic software maintained on a best-effort basis.
+(`./src/pact --version`). We will acknowledge the report and coordinate a fix.
 
 ## Scope
 

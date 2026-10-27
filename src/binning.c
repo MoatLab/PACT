@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 
-/* binning.c — adaptive binning (Freedman-Diaconis), Algorithm 3. */
+/* binning.c: adaptive binning (Freedman-Diaconis), Algorithm 3. */
 
 #include <math.h>
 #include <stddef.h>
@@ -50,6 +50,11 @@ static double quickselect(double *arr, size_t low, size_t high, size_t k)
     return arr[low];
 }
 
+double pact_select_kth(double *values, size_t n, size_t k)
+{
+    return quickselect(values, 0, n - 1, k);
+}
+
 void calculate_quartiles(reservoir_t *r, double *q1, double *q3)
 {
     if (r->count < 4) {
@@ -75,18 +80,18 @@ void calculate_quartiles(reservoir_t *r, double *q1, double *q3)
     free(work);
 }
 
-void update_bin_width(pact_context_t *pact)
+/* Recompute bin_width of one PAC table via Freedman-Diaconis rule. */
+static void update_domain_bin_width(pac_domain_t *domain)
 {
-    pact_workload_t *wl = pact->workload;
-    binning_state_t *bin = wl->binning;
+    binning_state_t *bin = domain->binning;
 
     double q1, q3;
-    calculate_quartiles(wl->reservoir, &q1, &q3);
+    calculate_quartiles(domain->reservoir, &q1, &q3);
     if (q3 <= q1) {
         return;
     }
 
-    size_t n = kh_size(wl->pac_table);
+    size_t n = kh_size(domain->table);
     if (n == 0) {
         return;
     }
@@ -101,7 +106,8 @@ void update_bin_width(pact_context_t *pact)
     /* Pressure adjust (Algorithm 3): scale up if the table is much
      * larger than the promotion-candidate set (most pages cold → widen
      * bins to compress the long tail). N_c is the migration ring fill. */
-    size_t n_c = wl->migration_ring ? ring_buffer_migration_entry_size(wl->migration_ring) : 0;
+    size_t n_c =
+        domain->migration_ring ? ring_buffer_migration_entry_size(domain->migration_ring) : 0;
     if (n_c > 0) {
         if ((double)n / (double)n_c > PACT_BINNING_TH_SCALE) {
             new_width = 2 * new_width;
@@ -111,4 +117,13 @@ void update_bin_width(pact_context_t *pact)
     }
     bin->bin_width = new_width;
     bin->last_update = rdtsc();
+}
+
+void update_bin_width(pact_context_t *pact)
+{
+    for (int d = 0; d < pact->nr_domains; d++) {
+        if (pact->domains[d].binning && pact->domains[d].reservoir) {
+            update_domain_bin_width(&pact->domains[d]);
+        }
+    }
 }

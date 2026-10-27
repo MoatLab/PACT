@@ -34,6 +34,15 @@ struct pmu_platform {
     uint64_t event_llc_miss_local;  /* MEM_LOAD_L3_MISS_RETIRED.LOCAL_DRAM */
     uint64_t event_llc_miss_remote; /* MEM_LOAD_L3_MISS_RETIRED.REMOTE_DRAM */
 
+    /* Core events of the LLC way controller (Tierce, --use-cat). */
+    uint64_t event_llc_miss_any;   /* MEM_LOAD_L3_MISS_RETIRED, local + remote */
+    uint64_t event_stalls_l3_miss; /* CYCLE_ACTIVITY.STALLS_L3_MISS */
+    uint64_t event_instructions;   /* INST_RETIRED.ANY */
+    uint64_t event_cycles;         /* CPU_CLK_UNHALTED.THREAD */
+    uint64_t event_llc_miss_all;   /* LONGEST_LAT_CACHE.MISS */
+    uint64_t event_offcore_dd_out; /* OFFCORE_REQUESTS_OUTSTANDING.DEMAND_DATA_RD */
+    uint64_t event_offcore_dd;     /* OFFCORE_REQUESTS.DEMAND_DATA_RD */
+
     /* CHA-to-core mapping */
     int nr_cha_mapping;
     const int *cha_to_core_map;

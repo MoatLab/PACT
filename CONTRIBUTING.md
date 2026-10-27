@@ -1,7 +1,7 @@
 # Contributing to PACT
 
-Thanks for your interest. PACT is a research artifact for an ASPLOS 2026 paper;
-contributions that fix bugs, improve portability, or sharpen the documentation
+Thanks for your interest. This repository holds the runtime with two modes,
+PACT (ASPLOS 2026) and Tierce (SOSP 2026). Contributions that fix bugs, improve portability, or sharpen the documentation
 are welcome.
 
 ## Build, style, and checks
@@ -15,27 +15,29 @@ make -C src check-style                        # coarse brace-style gate (grep)
 make -C src check-format CLANG_FORMAT=clang-format-18   # full clang-format gate
 ```
 
-CI (`.github/workflows/ci.yml`) runs the build (default and `make logging`
-variants) and both style gates on every push and pull request; please make sure
-they pass locally first. Match the conventions in
+CI (`.github/workflows/ci.yml`) runs on pushes to `main` or `master` and
+on pull requests. It runs the build (default and `make logging` variants),
+both style gates, and every regression test of [`tests/`](tests/README.md)
+except `test-memtis-pte-allocation.py`, which needs a patched Memtis kernel
+tree. Please make sure they pass locally first. Match the conventions in
 [`src/CODING_STYLE.md`](src/CODING_STYLE.md).
 
 ## What can be tested without special hardware
 
-Most of PACT's algorithms build and run anywhere, but end-to-end operation
-needs a supported Intel server NUMA host (Skylake-X / Cascade Lake, Sapphire
+The regression tests in `tests/` run without PMU hardware, but end-to-end
+operation needs a supported Intel server NUMA host (Skylake-X / Cascade Lake, Sapphire
 Rapids, or Emerald Rapids) with working PEBS and CHA/uncore counters, root, and
 reboot access (see the [README](README.md) requirements). If
 a change affects behavior that only manifests on that hardware, describe the
 machine you tested on (`./src/pact --version`, CPU model, kernel, `numactl -H`)
-and attach the relevant logs from `run/results/<workload>/pact/` in your pull
-request.
+and attach the relevant logs from `run/results/<workloads>/<arm>-<timestamp>/`
+in your pull request.
 
 ## Third-party and mixed-license code
 
 Some directories vendor or adapt upstream code (kernel patches, `khashl.h`,
 `minicoro.h`, and the baseline systems) under their own
-licenses — see [`NOTICE`](NOTICE) and [`LICENSE`](LICENSE). Do not restyle
+licenses: see [`NOTICE`](NOTICE) and [`LICENSE`](LICENSE). Do not restyle
 vendored files into PACT conventions, and do not add MIT/PACT headers to them.
 New first-party files should carry the MIT SPDX header used across `src/`.
 

@@ -44,6 +44,14 @@ void check_migration_balance(pact_context_t *ctx)
 int numa_move_pages(int pid, unsigned long count, void **pages, const int *nodes, int *status,
                     int flags)
 {
+    if (!nodes) {
+        /* The node query before each call: every queued page is on node 1. */
+        assert(pid == getpid() && count <= 32 && flags == 0);
+        for (unsigned long i = 0; i < count; i++) {
+            status[i] = 1;
+        }
+        return 0;
+    }
     assert(pid == getpid() && count <= 32 && flags == MPOL_MF_MOVE);
     for (unsigned long i = 0; i < count; i++) {
         uintptr_t index = (uintptr_t)pages[i] / PAGE_SIZE - 1;
@@ -67,7 +75,11 @@ int main(void)
     pac_metadata_t *metadata = calloc(TOTAL_PAGES, sizeof(*metadata));
     assert(metadata);
     pact_workload_t wl = {.target_pid = getpid()};
-    pact_context_t ctx = {.workload = &wl,
+    pac_domain_t domain = {0};
+    pact_context_t ctx = {.workloads = &wl,
+                          .nr_workloads = 1,
+                          .domains = &domain,
+                          .nr_domains = 1,
                           .migration_cpu = -1,
                           .max_migrations_per_cycle = 32,
                           /* A short balance interval checks progress during idle waits. */
@@ -86,11 +98,12 @@ int main(void)
             }
         }
         metadata[i].page_addr = (uint64_t)(i + 1) * PAGE_SIZE;
+        metadata[i].pid = getpid();
         metadata[i].tier = 1;
         metadata[i].migrating = true;
         submitted[i] = now_ns();
         migration_entry_t entry = {.meta = &metadata[i], .target_node = 0};
-        while (!ring_buffer_migration_entry_push(wl.migration_ring, entry)) {
+        while (!ring_buffer_migration_entry_push(domain.migration_ring, entry)) {
             sched_yield();
         }
         wake_migration_worker(&ctx);
@@ -106,7 +119,7 @@ int main(void)
     cleanup_migration_thread(&ctx);
     uint64_t stop_ns = now_ns() - stop_start;
     assert(!ctx.migration_thread_running && ctx.migration_wake_fd == -1);
-    assert(!wl.migration_ring && !atomic_load(&ctx.migration_error));
+    assert(!domain.migration_ring && !atomic_load(&ctx.migration_error));
     assert(wl.stats.promotion_successes == TOTAL_PAGES);
     assert(atomic_load(&balance_calls) >= SPARSE_PAGES);
     for (unsigned int i = 0; i < TOTAL_PAGES; i++) {

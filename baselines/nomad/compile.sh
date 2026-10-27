@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Nomad baseline kernel: Linux 5.13-rc6 + nomad.patch + nomad-alto.patch.
+# Build the Nomad baseline kernel: Linux v5.13-rc6 + nomad.patch + nomad-alto.patch.
 # Expects a Linux git checkout at ./linux (clone it there first; not bundled).
 set -euo pipefail
 
@@ -14,7 +14,7 @@ for p in "${PATCHES[@]}"; do
 done
 
 cd "$KERNEL_DIR"
-git checkout 5.13-rc6
+git checkout v5.13-rc6
 for p in "${PATCHES[@]}"; do
     echo "Applying $(basename "$p") ..."
     git apply "$p"

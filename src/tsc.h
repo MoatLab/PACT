@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
-/* tsc.h — TSC conversion helpers.
+/* tsc.h: TSC conversion helpers.
  *
- *
- * All TSC↔time conversions MUST go through these inlines, which use
- * `ctx->tsc_freq_hz` (detected at runtime via `detect_tsc_frequency()`
- * during pact_init). Never embed a hardcoded clock rate —
+ * All TSC/time conversions MUST go through these inlines, which use
+ * `ctx->tsc_freq_hz` (detected at runtime via `pact_detect_tsc_frequency()`
+ * during pact_init). Never embed a hardcoded clock rate.
  */
 
 #ifndef PACT_TSC_H
@@ -15,7 +14,7 @@
 
 #include "pact.h" /* pact_context_t (for tsc_freq_hz field) */
 
-/* Read the timestamp counter. Single source of truth — all *.c files should
+/* Read the timestamp counter. Single source of truth: all *.c files should
  * include this header and use this inline rather than redefining their own. */
 static inline uint64_t rdtsc(void)
 {

@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 
-/* sighandler.c — signal handling + crash marker.
+/* sighandler.c: signal handling + crash marker.
  *
  *
  * Async-signal-safe paths use only write(2) / open(2) / close(2) / _exit(2).
  */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -21,9 +22,9 @@
  * from a single-threaded startup phase (consistent with set_log_level in
  * error.c). */
 static char g_crash_marker_path[1024] = "";
-static volatile bool *g_running_flag = NULL;
-static volatile int g_signal_received = 0;
-static volatile bool g_shutdown_in_progress = false;
+static volatile sig_atomic_t *volatile g_running_flag = NULL;
+static volatile sig_atomic_t g_signal_received = 0;
+static volatile sig_atomic_t g_shutdown_in_progress = 0;
 
 void pact_signal_set_crash_marker_path(const char *path)
 {
@@ -33,6 +34,11 @@ void pact_signal_set_crash_marker_path(const char *path)
     }
     strncpy(g_crash_marker_path, path, sizeof(g_crash_marker_path) - 1);
     g_crash_marker_path[sizeof(g_crash_marker_path) - 1] = '\0';
+}
+
+void pact_signal_clear_running_flag(void)
+{
+    g_running_flag = NULL;
 }
 
 int pact_signal_received(void)
@@ -90,24 +96,27 @@ static void fatal_signal_handler(int sig)
     raise(sig);
 }
 
-/* Graceful-shutdown signal handler (SIGINT/SIGTERM/SIGHUP). */
+/* Graceful-shutdown signal handler (SIGINT/SIGTERM/SIGHUP). It saves and
+ * restores errno, so the code that it interrupts sees its own errno. */
 static void graceful_signal_handler(int sig)
 {
+    int saved_errno = errno;
     g_signal_received = sig;
 
     if (g_shutdown_in_progress) {
-        /* Second signal during shutdown — force exit */
+        /* Second signal during shutdown: force exit */
         if (sig == SIGINT || sig == SIGTERM) {
             const char msg[] = "\nForced shutdown requested. Exiting immediately.\n";
             safe_write(STDOUT_FILENO, msg, sizeof(msg) - 1);
             _exit(1);
         }
+        errno = saved_errno;
         return;
     }
-    g_shutdown_in_progress = true;
+    g_shutdown_in_progress = 1;
 
     if (g_running_flag) {
-        *g_running_flag = false;
+        *g_running_flag = 0;
     }
 
     /* Signal-safe banner */
@@ -128,9 +137,10 @@ static void graceful_signal_handler(int sig)
     safe_write(STDOUT_FILENO, msg1, sizeof(msg1) - 1);
     safe_write(STDOUT_FILENO, name, strlen(name));
     safe_write(STDOUT_FILENO, msg2, sizeof(msg2) - 1);
+    errno = saved_errno;
 }
 
-void pact_signal_install_handlers(volatile bool *running_flag)
+void pact_signal_install_handlers(volatile sig_atomic_t *running_flag)
 {
     g_running_flag = running_flag;
 

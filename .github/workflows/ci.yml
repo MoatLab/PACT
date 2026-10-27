@@ -43,8 +43,14 @@ jobs:
       - name: Reject incomplete task scans
         run: make -C src test-task-scan-error
 
+      - name: Thread exit during the counter refresh
+        run: make -C src test-thread-exit
+
       - name: Workload exit regression
         run: make -C src test-workload-exit
+
+      - name: Workload with every thread gone
+        run: make -C src test-workload-gone
 
       - name: PEBS quality accounting regression
         run: make -C src test-pebs-quality
@@ -90,3 +96,39 @@ jobs:
 
       - name: Migration status recovery regression
         run: make -C src test-migration-recovery
+
+      - name: Mode options and workload rules
+        run: make -C src test-cli-modes
+
+      - name: Tierce admission (reservoir bar and epochs)
+        run: make -C src test-tierce-admission
+
+      - name: Tierce per-CPU counters and workload MLP
+        run: make -C src test-workload-mlp
+
+      - name: Tierce round-robin migration
+        run: make -C src test-domain-round-robin
+
+      - name: Tierce sampling, stall scalar and LDLAT
+        run: make -C src test-tierce-sampling
+
+      - name: LDLAT-Dyn governor
+        run: make -C src test-ldlat-dyn
+
+      - name: LLC way controller
+        run: make -C src test-cat-control
+
+      - name: LLC way controller start
+        run: make -C src test-cat-start
+
+      - name: Migration trace
+        run: make -C src test-migration-trace
+
+      - name: Diagnostics build (make DIAG=1)
+        run: make -C src test-diag-build
+
+      - name: Workload cgroups and demotion counters
+        run: make -C src test-cgroup
+
+      - name: PACT global instance with several workloads
+        run: make -C src test-pact-global

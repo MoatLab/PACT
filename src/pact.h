@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 /*
- * pact.h — PACT runtime context, workload state, and PEBS sample encoding.
+ * pact.h: PACT runtime context, workload state, and PEBS sample encoding.
  */
 
 #ifndef PACT_H
@@ -11,10 +11,15 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <signal.h>
 #include "pmu.h"
 #include "obj-pool.h"
 #include "khashl.h"
 #include "ring-buffer.h"
+#include "ldlat-dyn.h"
+#include "cat.h"
+#include "trace.h"
+#include "diag.h"
 
 /* Mark a function parameter as deliberately unused (e.g. only referenced in
  * one branch of an #ifdef). Attaches the attribute at the parameter so no
@@ -31,39 +36,52 @@
 typedef struct mco_coro mco_coro;
 /* pact_context_t is forward-declared in pmu.h (included above) */
 
+/* Most workloads one runtime instance manages (--workload is repeatable). */
+#define MAX_WORKLOADS 16
+
+/* Runtime mode (--mode). PACT keeps one PAC table, one threshold and one
+ * migration queue for every workload. Tierce keeps one of each per workload
+ * (a domain), with per-workload MLP. */
+typedef enum {
+    PACT_MODE_PACT = 0,
+    PACT_MODE_TIERCE = 1,
+} pact_mode_t;
+
+static inline const char *pact_mode_name(pact_mode_t mode)
+{
+    return mode == PACT_MODE_TIERCE ? "tierce" : "pact";
+}
+
 /*
  * PAC metadata. The tier/flag bytes are updated concurrently by the
  * sampling path and the migration thread; each is an _Atomic byte so a
- * store is its own memory location. (As bitfields they shared one word,
- * so one thread's read-modify-write could erase the other's update —
- * e.g. a lost migrating=0 permanently blocks re-enqueue.)
+ * store of one field never changes another field. Both threads store
+ * tier, so the last store wins.
  */
 typedef struct pac_metadata {
     uint64_t page_addr;    /* Page virtual address */
     pid_t pid;             /* Owner process ID */
     uint64_t pac_value;    /* Accumulated PAC score */
     uint32_t access_count; /* Access frequency */
+    uint32_t epoch_stamp;  /* Tierce: last epoch that listed the page (0 = never) */
+    uint8_t workload;      /* Number of the owner workload (--workload order) */
 
-    _Atomic uint8_t tier;              /* Current memory tier */
-    _Atomic uint8_t prev_tier;         /* Previous tier (ping-pong detection) */
-    _Atomic uint8_t migrating;         /* Migration in progress */
-    _Atomic uint8_t promoted_by_pact;  /* Promoted by PACT */
-    _Atomic uint8_t promoted_by_other; /* Promoted by non-PACT mechanism */
-    _Atomic uint8_t demoted_by_pact;   /* Demoted by PACT */
-    _Atomic uint8_t demoted_by_other;  /* Demoted by non-PACT mechanism */
-    _Atomic uint8_t sampled_on_fast;   /* Sampled on fast tier */
-    _Atomic uint8_t sampled_on_slow;   /* Sampled on slow tier */
+    _Atomic uint8_t tier;      /* Current memory tier */
+    _Atomic uint8_t prev_tier; /* Previous tier (ping-pong detection) */
+    _Atomic uint8_t migrating; /* Migration in progress */
 } pac_metadata_t;
 
 /* Hash map type declarations - must be here for khash_t(pac) to work */
 KHASHL_MAP_INIT(KH_LOCAL, pac_table_t, pac_table, uint64_t, pac_metadata_t *, kh_hash_uint64,
                 kh_eq_generic)
 
-/* Demotion policies. */
-typedef enum {
-    DEMOTION_DISABLED = 0,   /* Disable demotion entirely */
-    DEMOTION_KERNEL_LRU = 1, /* Use the kernel's LRU-based demotion (default) */
-} demotion_policy_t;
+/* PAC table key: (workload number, page address). Page addresses use bits
+ * 12-56 (57-bit virtual addresses), so the workload number fits above. */
+_Static_assert(MAX_WORKLOADS <= 128, "workload number must fit in key bits 57-63");
+static inline uint64_t pac_key(unsigned int workload, uint64_t page_addr)
+{
+    return page_addr | ((uint64_t)workload << 57);
+}
 
 /* Coroutine types */
 typedef enum {
@@ -89,10 +107,8 @@ typedef struct migration_entry {
  * - 11-1, 11 bits: pac value (low)
  * - 0, 1 bit: tier (0=fast, 1=slow)
  * Total: 7+11=18 bits for PAC value, max 262143. Per-sample stalls are
- * ~k_cxl*period/MLP (~308K at period 400 and MLP 1), so 16 bits saturated
- * for every window with slow-tier MLP < ~4.7 and under-weighted exactly
- * the low-MLP phases the model marks as most latency-critical; 18 bits
- * saturates only in the MLP~1 worst case. */
+ * ~k_cxl*period/MLP (~308K at period 400 and MLP 1), so 18 bits saturate
+ * only when the slow-tier MLP is close to 1. */
 #define PEBS_ENCODE_PAC(pac, page_addr, tier)                                                      \
     ({                                                                                             \
         uint32_t _pac = (uint32_t)(pac);                                                           \
@@ -138,6 +154,29 @@ typedef struct {
     fast_prng_t prng;
 } reservoir_t;
 
+/* The kernel's node of each of `count` pages of process `pid`, written to
+ * `status` (a negative errno for a page without a node). Returns a negative
+ * value when the query fails as a whole. */
+typedef long (*page_node_query_fn)(int pid, unsigned long count, void **pages, int *status);
+
+/* Tierce page reservoir: a uniform sample of the pages of one PAC table.
+ * A page joins when it enters the table (classic reservoir rule); pages
+ * leave the table only at exit, so the member pointers stay valid. */
+typedef struct {
+    pac_metadata_t **members;
+    double *values; /* Scratch for the quantile of the members' PAC values */
+    /* Scratch for the node query of the members held on the fast tier */
+    void **query_pages;
+    int *query_status;
+    size_t *query_members;
+    page_node_query_fn query_nodes;
+    uint64_t query_failures; /* Node queries that failed as a whole */
+    size_t capacity;
+    size_t count;
+    uint64_t total_seen;
+    fast_prng_t prng;
+} page_reservoir_t;
+
 /* Binning state for adaptive thresholds */
 typedef struct {
     double bin_width;
@@ -149,26 +188,23 @@ typedef struct {
 /* Comprehensive statistics structure */
 typedef struct {
     /* Migration statistics */
-    uint64_t last_promotions_successes;
-    uint64_t last_demotions_successes;
-    /* Written with atomic RMW by the migration thread and read as policy
-     * input (balance.c) and by the stats coroutine; _Atomic makes those
-     * cross-thread reads defined instead of benign-on-x86 races. */
+    /* Written with atomic RMW, promotion_attempts by the event loop and the
+     * others by the migration thread. Read by the stats coroutine, the
+     * migration trace and LDLAT-Dyn. _Atomic makes those cross-thread reads
+     * defined. */
     _Atomic uint64_t promotion_attempts;
     _Atomic uint64_t promotion_successes;
     _Atomic uint64_t promotion_failures;
-    /* Kernel LRU demotions this run (owned by balance.c: pgdemote deltas
-     * relative to the startup baseline). */
-    uint64_t demotion_successes;
-    /* Pages a promotion batch reported landing on the slow tier (owned by
-     * the migration thread) — kept separate so balance.c's overwrite of
-     * demotion_successes cannot discard these increments. */
-    _Atomic uint64_t pact_demotions;
-    uint64_t new_demotions;
+    /* Queued pages that the node query before the call found already on
+     * the fast tier: not sent, not promotions. */
+    _Atomic uint64_t promotion_skips_resident;
+    /* Kernel LRU demotions this run (owned by balance.c on the migration
+     * thread: pgdemote deltas relative to the startup baseline). The stats
+     * coroutine reads it on the event-loop thread, so it is _Atomic. */
+    _Atomic uint64_t demotion_successes;
 
     /* PAC and memory access statistics */
     uint64_t time_running; /* Sum of per-task counter running nanoseconds. */
-    uint64_t llc_misses_fast;
     uint64_t llc_misses_slow;
     uint64_t pac_updates;
     uint64_t avg_pac;
@@ -188,18 +224,6 @@ typedef struct {
     /* PEBS sampling */
     uint64_t pebs_events_processed;
 
-    /* ping-pong effect logging - repromotions (demoted then promoted) */
-    uint64_t repromotions_pact_pact;   /* PACT demoted → PACT promoted */
-    uint64_t repromotions_pact_other;  /* PACT demoted → other promoted */
-    uint64_t repromotions_other_pact;  /* other demoted → PACT promoted */
-    uint64_t repromotions_other_other; /* other demoted → other promoted */
-
-    /* ping-pong effect logging - redemotions (promoted then demoted) */
-    uint64_t redemotions_pact_pact;   /* PACT promoted → PACT demoted */
-    uint64_t redemotions_pact_other;  /* PACT promoted → other demoted */
-    uint64_t redemotions_other_pact;  /* other promoted → PACT demoted */
-    uint64_t redemotions_other_other; /* other promoted → other demoted */
-
     /* Simple ping-pong tracking (tier history-based) */
     uint64_t total_repromotions; /* Total 0→1→0 patterns */
     uint64_t total_redemotions;  /* Total 1→0→1 patterns */
@@ -209,9 +233,21 @@ typedef struct {
     uint64_t pool_warn_last_tsc; /* TSC of last "pool full" log warning (rate-limit) */
 } pact_stats_t;
 
-/* khash for PAC table defined in pact_minicoro.h */
+/* One entry of the PAC update ring (PEBS aggregator -> adaptive coroutine):
+ * the 64-bit PEBS_ENCODE_PAC word (18-bit PAC, page address, tier) and the
+ * number of the workload that owns the page, in its own field. */
+typedef struct pac_update {
+    uint64_t encoded;
+    uint32_t workload;
+    uint32_t reserved;
+} pac_update_t;
 
-DEFINE_RING_BUFFER(uint64_t, uint64)
+/* Workload number of the entry that ends a Tierce epoch: the sampling
+ * window's updates before it are applied, then each domain refreshes its
+ * bar and admits its pages. */
+#define PAC_UPDATE_EPOCH_END UINT32_MAX
+
+DEFINE_RING_BUFFER(pac_update_t, pac_update)
 
 /* Ring buffer for migration entries (thread-based migration, single-page) */
 DEFINE_RING_BUFFER(migration_entry_t, migration_entry)
@@ -227,13 +263,55 @@ struct coro_timing {
 };
 
 /*
+ * One PAC table with its admission state and migration queue. PACT keeps
+ * one table for every workload: the score distribution, the threshold and
+ * the queue are global. Tierce keeps one table per workload (a domain).
+ */
+typedef struct pac_domain {
+    pac_table_t *table;
+    size_t nr_metadata; /* Metadata entries allocated for this table */
+
+    /* PACT adaptive binning: a sample of PAC values and the bin state. */
+    reservoir_t *reservoir;
+    binning_state_t *binning;
+
+    /* Tierce admission: the page reservoir, the 0.90-quantile bar of the
+     * members' PAC values, and the slow-tier pages updated in this epoch
+     * (each listed once). */
+    page_reservoir_t *pages;
+    double bar;
+    pac_metadata_t **epoch_pages;
+    size_t nr_epoch_pages;
+    size_t epoch_pages_cap;
+    uint64_t epoch_updates;   /* PAC updates of this table in this epoch */
+    uint64_t no_bar_epochs;   /* Epochs with PAC updates but no bar, so no admission */
+    uint64_t list_full_drops; /* Pages not listed because the list could not grow */
+
+    /* Pages dropped at a full migration ring: admitted pages (Tierce) or
+     * top-bin pages (PACT). */
+    uint64_t ring_full_drops;
+
+    ring_buffer_migration_entry_t *migration_ring;
+
+    /* Cooling trigger: samples applied to this table, and the count at the
+     * last cooling. */
+    uint64_t samples;
+    uint64_t cooling_last_trigger;
+} pac_domain_t;
+
+/*
  * Per-workload structure
  * Holds workload-specific configuration, PMU state, and statistics
  */
 typedef struct pact_workload {
     /* Process identification */
-    pid_t target_pid; /* Process ID */
-    char name[64];    /* Optional workload name/label */
+    pid_t target_pid;      /* Process ID */
+    char name[64];         /* Workload name/label */
+    char cgroup_path[256]; /* The workload's cgroup directory */
+    int index;             /* Workload number (--workload order) */
+    int domain;            /* Index of the PAC table that holds its pages */
+    int pidfd;             /* Stable workload identity and exit readiness */
+    _Atomic bool exited;   /* The process has exited; it is no longer sampled */
 
     /* CPU configuration */
     int *target_cpus;   /* Array of CPU IDs this workload runs on */
@@ -243,38 +321,55 @@ typedef struct pact_workload {
     /* Non-inheriting groups for each observed task, refreshed between windows. */
     thread_perf_t *threads;
     size_t nr_threads;
-    bool counters_valid;
 
-    /* Per-workload CHA PMUs for MLP measurement */
-    cha_pmu_info_t cha_pmus[MAX_CHAS]; /* CHA PMU configurations */
-    int nr_cha;                        /* Number of CHAs for this workload */
+    /* Demotion statistics: the cgroup's pgdemote count at startup. */
+    uint64_t demotion_baseline;
 
-    /* Per-tier MLP for the current window (ΔT1/ΔT2 over the workload's
-     * CHAs, Algorithm 1). */
-    double workload_mlp_fast;
-    double workload_mlp_slow;
+    /* Tierce: slow-tier MLP of the window, the mean of the per-core MLP
+     * over every CPU of the workload (wMLP). */
+    double mlp;
+
+    /* Tierce LDLAT: slow-tier baseline latency (cycles), an EWMA of the
+     * mean latency of the workload's samples that pass the data-source
+     * filter, before any software gate. A sample adds S_p =
+     * S_w * latency / k_slow to PAC, with k_slow from before the window's update. */
+    double k_slow;
+    uint64_t ldlat_filtered; /* samples not from remote DRAM (data-source filter) */
+    uint64_t ldlat_gated;    /* samples below the software latency gate */
 
     /* Per-workload statistics */
     pact_stats_t stats;          /* Workload-specific statistics */
     uint64_t total_pebs_samples; /* Cumulative PEBS samples attributed to this workload */
-
-    /* Workload data structures (PAC tracking + migration plumbing). */
-    pac_table_t *pac_table;
-    reservoir_t *reservoir;
-    binning_state_t *binning;
-    ring_buffer_migration_entry_t *migration_ring;
 } pact_workload_t;
 
-/* PACT runtime context — single instance per process; owns the workload. */
+/* PACT runtime context: one instance per process. It owns the workloads. */
 struct pact_context {
+    pact_mode_t mode;
+
     /* ===== Core Data Structures ===== */
-    ring_buffer_uint64_t *pac_update_ring; /* PEBS -> PAC updates ring buffer */
+    ring_buffer_pac_update_t *pac_update_ring; /* PEBS -> PAC updates ring buffer */
 
-    /* The workload — owned by the context; always non-NULL once
-     * initialize_workloads() succeeds. */
-    pact_workload_t *workload;
+    /* The workloads, in --workload order: owned by the context. */
+    pact_workload_t *workloads;
+    int nr_workloads;
 
-    /* CPU set the workload runs on (sched_getaffinity result, capped to 64). */
+    /* PAC tables: PACT keeps one for every workload, Tierce one per
+     * workload. */
+    pac_domain_t *domains;
+    int nr_domains;
+
+    /* Tierce epoch number; a page listed in this epoch carries it. */
+    uint32_t pac_epoch;
+
+    /* CHA slices for the MLP. PACT: every mapped CHA, TID filter off.
+     * Tierce: the CHA paired with each workload CPU, TID filter on. */
+    cha_pmu_info_t cha_pmus[MAX_CHAS];
+    int nr_cha;
+    /* Slow-tier MLP of the current window: one ratio of sums over every
+     * fresh CHA, shared by all workloads (Algorithm 1). */
+    double global_mlp;
+
+    /* Union of the workloads' CPU sets (capped to CPUs 0-63). */
     uint64_t all_cpus_mask;
     int *all_cpus;
     int nr_all_cpus;
@@ -294,8 +389,8 @@ struct pact_context {
      * the context so the event loop can fold it into next_deadline_tsc(). */
     uint64_t targets_alive_next_tsc;
 
-    /* ===== Adaptive Components — initial config; the live state lives
-     * on ctx->workload. ===== */
+    /* ===== Adaptive Components: initial config. The live state lives
+     * on the PAC domain. ===== */
     double bin_width;
     size_t bin_count;
 
@@ -304,49 +399,55 @@ struct pact_context {
     bool pebs_available;                     /* PEBS availability flag */
 
     /* ===== Configuration ===== */
-    /* Policies */
-    demotion_policy_t demotion_policy;
-
     /* Timing intervals (ms) */
     uint32_t sampling_interval_ms;
     uint32_t cooling_interval_ms;
     uint32_t adaptive_interval_ms;
     uint32_t stats_interval_ms;
 
-    /* PEBS sampling period */
+    /* PEBS sampling period (of the open event: LLC-miss loads or LDLAT) */
     uint64_t pebs_sampling_period;
 
-    uint32_t max_migrations_per_cycle;
+    /* Tierce LDLAT */
+    bool use_ldlat;
+    uint32_t ldlat_gate;         /* static software gate in cycles; 350 (the floor) = none */
+    ldlat_dyn_state_t ldlat_dyn; /* LDLAT-Dyn governor (--ldlat-dyn) */
 
-    /* Demotion aggressiveness m (Algorithm 2): kernel LRU demotion stays
-     * enabled while N_demoted < N_promoted + m. m = 0 balances demotions
-     * against promotions; larger m keeps demotion running ahead of
-     * promotions (proactive fast-tier headroom). */
-    uint64_t demotion_margin;
+    /* Tierce LLC way controller (--use-cat) */
+    cat_state_t cat;
 
-    /* Startup snapshot of the cumulative /proc/vmstat pgdemote counters;
-     * balance.c counts this run's demotions relative to it. */
-    uint64_t demotion_baseline;
+    /* Per-second migration trace (--trace-migration) */
+    migration_trace_t migration_trace;
+    char trace_migration_path[256];
+
+#ifdef PACT_DIAG
+    pac_dump_t pac_dump; /* --dump-pac-table */
+    char dump_pac_table_path[256];
+    uint32_t dump_pac_interval_s;
+    uint32_t no_promote_mask; /* --no-promote-wl: bit w keeps workload w out of promotion */
+#endif
+
+    uint32_t max_migrations_per_cycle; /* PACT: most pages per numa_move_pages call */
+    uint32_t domain_migration_batch;   /* Tierce: most pages per domain per turn */
 
     /* Cooling factor + trigger (Algorithm 1 α-decay). */
     double cooling_alpha;             /* 1.0 = no cooling (default) */
-    uint64_t cooling_trigger_samples; /* global sample-count threshold */
+    uint64_t cooling_trigger_samples; /* samples per PAC table */
 
     /* Cooling-related stats */
     uint64_t sample_counts;
 
     /* Hardware constants */
-    uint64_t k_constant_dram; /* DRAM latency constant (238) */
-    uint64_t k_constant_cxl;  /* CXL latency constant (771) */
-    uint64_t tsc_freq_hz;     /* TSC frequency for time calculations */
+    uint64_t k_constant_cxl; /* CXL latency constant (771) */
+    uint64_t tsc_freq_hz;    /* TSC frequency for time calculations */
 
     /* ===== Logging ===== */
 #ifdef PACT_ENABLE_LOGGING
     bool enable_logging;
     FILE *log_file;
-    char log_format[16]; /* "csv" or "json" */
+    char log_format[16]; /* "csv" */
 #else
-    bool enable_logging; /* Keep for compatibility, but unused */
+    bool enable_logging; /* Set by the CLI. Only the logging build reads it. */
 #endif
 
     /* ===== Memory Pools ===== */
@@ -354,9 +455,14 @@ struct pact_context {
     size_t max_pac_entries;         /* Cap on PAC metadata entries (0 = unlimited) */
 
     /* ===== Control Flags ===== */
-    volatile bool running;
+    /* Cleared by the event loop and by the shutdown signal handler, so it
+     * has the type that a signal handler may write. */
+    volatile sig_atomic_t running;
     bool sampling_failed;
-    int target_pidfd; /* Stable workload identity and exit readiness. */
+
+    /* Run-wide statistics: PEBS buffer quality, PAC table capacity and
+     * cooling. Per-workload counters live on each workload. */
+    pact_stats_t stats;
 
     /* ===== Coroutine scheduling state ===== */
 
@@ -367,24 +473,31 @@ struct pact_context {
     int migration_wake_fd;
     _Atomic bool migration_wake_pending;
     _Atomic int migration_error;
+    /* Node queries before a promotion call that failed as a whole. */
+    _Atomic uint64_t residency_query_failures;
 
     /* CPU affinity configuration */
     int monitor_cpu;   /* CPU for main event loop (-1 = no pinning) */
     int migration_cpu; /* CPU for migration thread (-1 = no pinning) */
 };
 
-/* Global context pointer for compatibility */
+/* Global context pointer */
 extern pact_context_t *g_pact_ctx;
 
-/* Helper macros for easy migration */
-#define pact_system_t pact_context_t
+/* Short name of the global context pointer */
 #define g_pact g_pact_ctx
 
 
-/* TGID filter: exact match against the workload's target_pid. */
-static inline bool is_target_pid(const pact_context_t *ctx, pid_t pid)
+/* TGID filter: the number of the workload whose target_pid is pid, or -1.
+ * Exited workloads keep their slot, so their late samples still match. */
+static inline int pact_find_workload(const pact_context_t *ctx, pid_t pid)
 {
-    return ctx->workload->target_pid == pid;
+    for (int i = 0; i < ctx->nr_workloads; i++) {
+        if (ctx->workloads[i].target_pid == pid) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 /* Interval (in ms) for the given coroutine type. Looks up the configured

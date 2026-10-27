@@ -1,9 +1,6 @@
 Subject: [PATCH] mm: expose Memtis vmstat names independently of balloon support
 
-HTMM event enums are enabled by CONFIG_HTMM alone. The original Memtis patch
-nested their text labels inside CONFIG_MEMORY_BALLOON, leaving the vmstat
-array eight entries short when balloon support is disabled. Match the enum
-conditionals so that those configurations compile and preserve counter names.
+Build fix: HTMM vmstat names follow CONFIG_HTMM. No policy change.
 
 --- a/mm/vmstat.c
 +++ b/mm/vmstat.c

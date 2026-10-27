@@ -1,103 +1,51 @@
 # Runtime regression tests
 
-Run `make -C src test-pebs-startup` to verify that failed PEBS setup returns
-an error without enabling counters, and successful setup still enables them.
-The test exercises the actual setup function with mocked PMU calls and uses
-AddressSanitizer and UndefinedBehaviorSanitizer; hardware access is not required.
+The tests need no PMU hardware and no root. Each `make -C src <target>`
+builds and runs one test, most of them with AddressSanitizer and
+UndefinedBehaviorSanitizer. CI runs all of them.
 
-`make -C src test-log-levels` checks actual emitted records for the default
-INFO setting and levels 0–4, then checks the real CLI range and help text.
-The test requires Python 3 and a C compiler, but no PMU hardware.
+| Target | What it checks |
+|--------|----------------|
+| `test-pebs-startup` | PEBS setup failures return an error and enable no counter |
+| `test-log-levels` | the log levels and the `--log-level` range (needs Python 3) |
+| `test-sampling-window` | sampling-window deadlines in both modes |
+| `test-thread-coverage` | counting groups follow the workload threads |
+| `test-task-scan-error` | a failed scan of a workload's task directory |
+| `test-thread-exit` | a thread that exits during the counting refresh |
+| `test-workload-exit` | workload exit detection with pidfds |
+| `test-workload-gone` | sampling while workloads exit |
+| `test-pebs-quality` | the PEBS ring reader and sample accounting |
+| `test-cha-freshness` | failed CHA reads and the MLP of stale CHAs |
+| `test-pmu-control` | reset, enable and disable failures of the counter groups |
+| `test-bin-index` | PAC bin index bounds |
+| `test-binning` | adaptive bin quartiles against a full sort |
+| `test-pac-stats` | the PAC distribution log |
+| `test-pac-threshold` | the PACT top-bin admission |
+| `test-quiet-stats` | the statistics coroutine at each log level |
+| `test-startup-alloc` | allocation failures at workload start |
+| `test-pool-limit` | `--pac-pool-max` |
+| `test-pool-fallback` | PAC tables without the object pool |
+| `test-migration-recovery` | migration failures and the node query before each call |
+| `test-event-loop-startup` | event loop start and shutdown, with each startup failure |
+| `test-migration-stop` | migration thread stop and result handling |
+| `test-migration-wakeup` | migration worker wakeup |
+| `test-migration-wait-stress` | a burst of queued pages, then single pages |
+| `test-cli-modes` | mode options, `--workload` rules and LDLAT gate combinations |
+| `test-tierce-admission` | the Tierce 0.90 quantile bar |
+| `test-workload-mlp` | per-workload MLP |
+| `test-domain-round-robin` | migration batching in both modes |
+| `test-tierce-sampling` | Tierce sample attribution, `S_w` and the LDLAT `S_p` |
+| `test-ldlat-dyn` | the LDLAT-Dyn gate rules |
+| `test-cat-control` | the LLC way controller |
+| `test-cat-start` | LLC way controller start and start failures |
+| `test-migration-trace` | the `--trace-migration` CSV |
+| `test-diag-build` | the `make DIAG=1` build and its options |
+| `test-cgroup` | the cgroup files and the demotion counters |
+| `test-pact-global` | PACT-mode sampling over two workloads |
 
-Run `make -C src test-sampling-window` without root or PMU hardware.
-The test executes the actual PEBS coroutine with an expired scheduler deadline
-and stubbed counter operations. It requires the next deadline to leave a full
-configured sampling interval after counters restart. It does not establish
-hardware sampling coverage or application performance.
+Two tests run with Python 3 instead of `make`:
 
-## Thread counter coverage
-
-`make -C src test-thread-coverage` runs the actual counting setup with real
-thread creation and `/proc` discovery, mocking perf event creation and control.
-It checks attachment to existing and later workers, stable descriptor reuse,
-exited-thread cleanup, non-inheriting groups, and failed-member cleanup under
-ASan/UBSan. Hardware counter accuracy and performance require native tests.
-
-The sampling-window test also requires the old PEBS ring to be drained before
-counter restart, so newly covered threads cannot enter the previous window.
-
-`make -C src test-workload-exit` creates a real child and checks exit before
-reaping it. A pidfd must report termination while `kill(pid, 0)` still succeeds.
-The sampling-window test covers exit becoming visible during counter refresh.
-
-`make -C src test-pebs-quality` checks published perf-ring boundaries, wrapping
-records, loss/throttle accounting, target-thread coverage and staging/update
-queue drops through the actual reader and aggregation code under ASan/UBSan.
-It does not require PMU hardware.
-
-`make -C src test-cha-freshness` injects failed and malformed CHA group reads,
-checks recovery boundaries and scheduling-time rollback, and rejects MLP from
-incomplete CHA coverage. It exercises the runtime reader under ASan/UBSan.
-
-`make -C src test-pmu-control` injects reset, enable, and disable failures
-into core, CHA, and task groups. Every failure must stop sampling and attempt
-to disable all configured groups; offline core slots are skipped.
-
-## Bin-index bounds
-
-`make -C src test-bin-index` runs the actual PAC update and promotion-queue
-path with AddressSanitizer, UndefinedBehaviorSanitizer and float-cast overflow
-checks. It verifies very small finite bin widths, scores at the uint64 limit,
-zero scores, and ordinary admission boundaries. Oversized bin indices saturate
-without changing the score or normal threshold behavior.
-
-## Adaptive binning quartiles
-
-`make -C src test-binning` compares the actual quartile calculation with an
-independent full-sort oracle for repeated, ordered, reverse-ordered and random
-scores, including the production reservoir size of 100. It also checks input
-preservation under ASan/UBSan. Optional `--bench` output from the test binary
-measures local CPU time only; application performance needs native experiments.
-
-`make -C src test-pac-stats` exercises the actual distribution logger and
-parses emitted total/per-tier averages for scores near UINT64_MAX. The
-accumulators must not wrap, and an empty table must not emit a distribution.
-This checks telemetry arithmetic, not workload performance.
-
-`make -C src test-pac-threshold` compares the actual histogram count with
-promotion-queue admission for fractional, ordinary, and very large accepted
-bin widths. It checks float-cast overflow under ASan/UBSan. The `PAC_DIST`
-`threshold` field is a floating-point value and may use scientific notation or
-`inf`; consumers should parse it as a floating-point number. These diagnostic
-checks do not establish an application performance improvement.
-
-`make -C src test-quiet-stats` runs the actual statistics coroutine across
-all five logging levels. Error/warning levels skip collection; INFO and higher
-still report the PAC distribution. Every level must yield and shut down cleanly.
-This verifies skipped diagnostic work, not application performance improvement.
-
-`make -C src test-startup-alloc` exercises workload initialization with each
-`calloc` call failed in turn. It checks that a missing PAC table is rejected
-and recoverable failures free all earlier allocations. A fixed affinity fixture
-keeps the test independent of host CPU numbering. Fatal `safe_calloc` failures
-must retain their existing nonzero exit behavior. UBSan rejects invalid
-accesses inside allocation helpers before the caller can handle failure.
-
-Run `python3 tests/test-workload-paths.py` to check the seven built-in
-workload definitions with paths containing spaces and shell metacharacters.
-The tests execute argument-recording stand-ins through both Bash command and
-`eval` launch forms. They require Python 3, Bash and `timeout`, but no root,
-PMU hardware, benchmark datasets or licensed SPEC binaries.
-
-`make -C src test-pool-limit` checks the actual CLI and pool initialization:
-default and explicit limits, `0` for unlimited, saturation at one entry, and
-rejection of malformed or overflowing values. It requires no PMU hardware.
-
-`make -C src test-pool-fallback` injects pool-creation failure and checks that
-heap-backed PAC entries still obey the configured cap. It also checks the
-normal pool path, unlimited mode, skip accounting, and cleanup.
-
-`make -C src test-migration-recovery` checks partial and global migration failures,
-bounded residency queries for untouched status slots, preservation of written
-page errors, and failed or incomplete queries under ASan/UBSan. A destination
-observation does not prove that this migration call physically copied the page.
+- `python3 tests/test-workload-paths.py` checks the workload definitions of
+  `run/workloads.sh` with paths that contain spaces and shell characters.
+- `tests/test-memtis-pte-allocation.py` needs a patched Memtis kernel tree
+  (see [`../baselines/memtis/`](../baselines/memtis/)). CI does not run it.

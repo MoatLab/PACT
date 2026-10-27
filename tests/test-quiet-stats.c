@@ -23,13 +23,17 @@ static void check_level(int level)
 {
     binning_state_t bin = {.bin_width = 1000, .bin_count = 20};
     pac_metadata_t entry = {.pac_value = 19000, .tier = 1};
-    pact_workload_t workload = {.binning = &bin, .name = "quiet-stats-test"};
-    workload.pac_table = pac_table_init();
+    pact_workload_t workload = {.name = "quiet-stats-test"};
+    pac_domain_t domain = {.binning = &bin};
+    domain.table = pac_table_init();
     int absent;
-    khint_t key = pac_table_put(workload.pac_table, 4096, &absent);
+    khint_t key = pac_table_put(domain.table, 4096, &absent);
     assert(absent);
-    kh_val(workload.pac_table, key) = &entry;
-    pact_context_t context = {.workload = &workload,
+    kh_val(domain.table, key) = &entry;
+    pact_context_t context = {.workloads = &workload,
+                              .nr_workloads = 1,
+                              .domains = &domain,
+                              .nr_domains = 1,
                               .running = true,
                               .tsc_freq_hz = 1000000000,
                               .start_tsc = rdtsc() - 1000000};
@@ -53,7 +57,7 @@ static void check_level(int level)
     assert(mco_resume(co) == MCO_SUCCESS);
     assert(mco_status(co) == MCO_DEAD);
     assert(mco_destroy(co) == MCO_SUCCESS);
-    pac_table_destroy(workload.pac_table);
+    pac_table_destroy(domain.table);
 }
 
 int main(void)

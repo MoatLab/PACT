@@ -1,4 +1,4 @@
-# PACT runtime clang-format config — Linux/QEMU-derived with project tweaks.
+# PACT runtime clang-format config: Linux/QEMU-derived with project tweaks.
 #
 # Run `make format` to apply, `make check-format` in CI to enforce.
 # Requires clang-format 16+ for InsertBraces support.
@@ -12,7 +12,7 @@ TabWidth: 4
 UseTab: Never
 ContinuationIndentWidth: 4
 
-# Line length cap. Kernel: 80, modern style: 100. We pick 100 — many existing
+# Line length cap. Kernel: 80, modern style: 100. We pick 100: many existing
 # pact lines exceed 80 for log_xxx() format strings, and 100 keeps them on one
 # line. Hard wrap above this.
 ColumnLimit: 100

@@ -1,0 +1,2354 @@
+diff --git a/include/linux/cgroup-defs.h b/include/linux/cgroup-defs.h
+index 8a0d5466c..df666b578 100644
+--- a/include/linux/cgroup-defs.h
++++ b/include/linux/cgroup-defs.h
+@@ -645,6 +645,10 @@ struct cftype {
+ #ifdef CONFIG_DEBUG_LOCK_ALLOC
+ 	struct lock_class_key	lockdep_key;
+ #endif
++
++#ifdef CONFIG_MMCTL
++	int numa_node_id;
++#endif
+ };
+ 
+ /*
+diff --git a/include/linux/memcontrol.h b/include/linux/memcontrol.h
+index b6eda2ab2..ac5ab46ee 100644
+--- a/include/linux/memcontrol.h
++++ b/include/linux/memcontrol.h
+@@ -115,6 +115,31 @@ struct lruvec_stats {
+ 	long state_pending[NR_VM_NODE_STAT_ITEMS];
+ };
+ 
++#ifdef CONFIG_MMCTL
++struct memcg_migration_ctl {
++	/* start time in ms of current promote rate limit period */
++	unsigned int nbp_rl_start;
++	/* number of promote candidate pages at start time of current rate limit period */
++	unsigned long nbp_rl_nr_cand;
++	/* promote threshold in ms */
++	unsigned int nbp_threshold;
++	/* start time in ms of current promote threshold adjustment period */
++	unsigned int nbp_th_start;
++	/*
++	 * number of promote candidate pages at start time of current promote
++	 * threshold adjustment period
++	 */
++	unsigned long nbp_th_nr_cand;
++};
++#endif
++
++#define NR_CGROUP_NODE_STAT 2
++
++enum cgroup_node_stat_item {
++	CGROUP_PGPROMOTE_SUCCESS,		/* promote successfully */
++	CGROUP_PGPROMOTE_CANDIDATE	/* candidate pages to promote */
++};
++
+ /*
+  * per-node information in memory controller.
+  */
+@@ -126,6 +151,18 @@ struct mem_cgroup_per_node {
+ 
+ 	unsigned long		lru_zone_size[MAX_NR_ZONES][NR_LRU_LISTS];
+ 
++#ifdef CONFIG_MMCTL /* struct mem_cgroup_per_node */
++	int nid;
++	unsigned long		max_nr_base_pages; /* Set by "max_at_node" param */
++	atomic_long_t		nr_node_pages;	   /* Live count of charged pages on this node */
++	struct memcg_migration_ctl mig;
++	atomic_long_t vm_stat[NR_CGROUP_NODE_STAT];
++	struct task_struct *kdemotiond;
++	struct mutex kdemotiond_lock;
++	int kdemotiond_order;
++	wait_queue_head_t kdemotiond_wait;
++#endif
++
+ 	struct mem_cgroup_reclaim_iter	iter;
+ 
+ 	struct shrinker_info __rcu	*shrinker_info;
+@@ -138,6 +175,33 @@ struct mem_cgroup_per_node {
+ 						/* use container_of	   */
+ };
+ 
++#ifdef CONFIG_MMCTL
++static inline void memcg_kdemotiond_lock(struct mem_cgroup_per_node *node)
++{
++	mutex_lock(&node->kdemotiond_lock);
++}
++
++static inline void memcg_kdemotiond_unlock(struct mem_cgroup_per_node *node)
++{
++	mutex_unlock(&node->kdemotiond_lock);
++}
++
++static inline void memcg_kdemotiond_lock_init(struct mem_cgroup_per_node *node)
++{
++	mutex_init(&node->kdemotiond_lock);
++}
++#else
++static inline void memcg_kdemotiond_lock(struct mem_cgroup_per_node *node) {}
++static inline void memcg_kdemotiond_unlock(struct mem_cgroup_per_node *node) {}
++static inline void memcg_kdemotiond_lock_init(struct mem_cgroup_per_node *node) {}
++#endif
++
++unsigned long cgroup_node_page_state_get(struct mem_cgroup_per_node *pn,
++				    enum cgroup_node_stat_item item);
++void cgroup_node_page_state_add(struct mem_cgroup_per_node *pn,
++					enum cgroup_node_stat_item item, long delta);
++
++
+ struct mem_cgroup_threshold {
+ 	struct eventfd_ctx *eventfd;
+ 	unsigned long threshold;
+@@ -325,9 +389,22 @@ struct mem_cgroup {
+ 	struct lru_gen_mm_list mm_list;
+ #endif
+ 
++#ifdef CONFIG_MMCTL /* struct mem_cgroup */
++	/*
++	 * Serializes the writers of mmctl_enabled, demotion_enabled and the
++	 * per-node limits, and their starts and stops of kdemotiond.
++	 */
++	struct mutex mmctl_lock;
++	bool mmctl_enabled;
++	bool demotion_enabled;
++	unsigned long max_nr_dram_pages; /* the maximum number of pages */
++	atomic_long_t promotion_counter;
++#endif
++
+ 	struct mem_cgroup_per_node *nodeinfo[];
+ };
+ 
++
+ /*
+  * size of first charge trial.
+  * TODO: maybe necessary to use big numbers in big irons or dynamic based of the
+@@ -1911,4 +1988,26 @@ static inline void obj_cgroup_uncharge_zswap(struct obj_cgroup *objcg,
+ }
+ #endif
+ 
++#ifdef CONFIG_MMCTL
++static inline bool memcg_nodectl_status(struct mem_cgroup *memcg)
++{
++	return memcg && memcg->mmctl_enabled;
++}
++
++static inline unsigned long memcg_get_node_limit(struct mem_cgroup *memcg,
++					int dst_nid)
++{
++	return READ_ONCE(memcg->nodeinfo[dst_nid]->max_nr_base_pages);
++}
++
++unsigned long memcg_get_node_usedpages(struct mem_cgroup *memcg, pg_data_t *pgdat);
++bool memcg_watermark_ok(pg_data_t *pgdat, struct mem_cgroup *memcg, unsigned int order,
++					unsigned long mark, int highest_zoneidx);
++bool _memcg_watermark_ok(struct zone *z, unsigned int order, unsigned long mark,
++					int highest_zoneidx, unsigned long free_nr_pages, unsigned long max_nr_pages);
++void wakeup_kdemotiond(struct mem_cgroup_per_node *pn, struct zone *zone, gfp_t gfp_flags, int order);
++bool memcg_can_demote(struct mem_cgroup *memcg);
++
++#endif
++
+ #endif /* _LINUX_MEMCONTROL_H */
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 9fb1b03b8..a0eebd237 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -1237,6 +1237,10 @@ struct memory_failure_stats {
+ };
+ #endif
+ 
++#ifdef CONFIG_MMCTL
++extern unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru, int zone_idx);
++#endif
++
+ /*
+  * On NUMA machines, each NUMA node would have a pg_data_t to describe
+  * it's memory layout. On UMA machines there is a single pglist_data which
+@@ -1385,6 +1389,12 @@ typedef struct pglist_data {
+ #ifdef CONFIG_MEMORY_FAILURE
+ 	struct memory_failure_stats mf_stats;
+ #endif
++
++#ifdef CONFIG_MMCTL
++	struct cftype *memcg_htmm_file;
++	struct cftype *memcg_demotion_file;
++	struct cftype *memcg_counter_file;
++#endif
+ } pg_data_t;
+ 
+ #define node_present_pages(nid)	(NODE_DATA(nid)->node_present_pages)
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 5f6587d94..92a16a250 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -56,6 +56,8 @@
+ #include "stats.h"
+ #include "autogroup.h"
+ 
++#include <linux/memcontrol.h>
++
+ /*
+  * Targeted preemption latency for CPU-bound tasks:
+  *
+@@ -1565,6 +1567,82 @@ static void numa_promotion_adjust_threshold(struct pglist_data *pgdat,
+ 	}
+ }
+ 
++/*
++ * MMCTL: only ZONE_NORMAL is checked. The free space of the cgroup under its
++ * node limit is compared with the zone watermarks, scaled to that limit.
++ */
++static bool memcg_free_space_enough(struct pglist_data *pgdat,
++					struct mem_cgroup *memcg, unsigned long max_nr_pages)
++{
++	unsigned long enough_wmark;
++	struct zone *normal;
++	unsigned long used_nr_pages = 0, free_nr_pages;
++	bool result;
++
++	enough_wmark = max(1UL * 1024 * 1024 * 1024 >> PAGE_SHIFT,
++			   pgdat->node_present_pages >> 4);
++
++	used_nr_pages = memcg_get_node_usedpages(memcg, pgdat);
++
++	if(used_nr_pages > max_nr_pages)
++		return false;
++
++	free_nr_pages = max_nr_pages - used_nr_pages;
++	normal = &pgdat->node_zones[ZONE_NORMAL];
++
++	result = _memcg_watermark_ok(normal, 0, wmark_pages(normal, WMARK_PROMO)
++				+ enough_wmark, ZONE_MOVABLE, free_nr_pages, max_nr_pages);
++
++	return result;
++}
++
++static void numa_cgroup_promotion_adjust_threshold(struct mem_cgroup_per_node *pn,
++					    unsigned long rate_limit,
++					    unsigned int ref_th)
++{
++	unsigned int now, start, th_period, unit_th, th;
++	unsigned long nr_cand, ref_cand, diff_cand;
++	struct memcg_migration_ctl *mig = &pn->mig;
++
++	now = jiffies_to_msecs(jiffies);
++	th_period = sysctl_numa_balancing_scan_period_max;
++	start = mig->nbp_th_start;
++	if (now - start > th_period &&
++	    cmpxchg(&mig->nbp_th_start, start, now) == start) {
++		ref_cand = rate_limit *
++			sysctl_numa_balancing_scan_period_max / MSEC_PER_SEC;
++		nr_cand = cgroup_node_page_state_get(pn, CGROUP_PGPROMOTE_CANDIDATE);
++		diff_cand = nr_cand - mig->nbp_th_nr_cand;
++		unit_th = ref_th * 2 / NUMA_MIGRATION_ADJUST_STEPS;
++		th = mig->nbp_threshold ? : ref_th;
++		if (diff_cand > ref_cand * 11 / 10)
++			th = max(th - unit_th, unit_th);
++		else if (diff_cand < ref_cand * 9 / 10)
++			th = min(th + unit_th, ref_th * 2);
++		WRITE_ONCE(mig->nbp_th_nr_cand, nr_cand);
++		mig->nbp_threshold = th;
++	}
++}
++
++static bool numa_cgroup_promotion_rate_limit(struct mem_cgroup_per_node *pn,
++				      unsigned long rate_limit, int nr)
++{
++	unsigned long nr_cand;
++	unsigned int now, start;
++	struct memcg_migration_ctl *mig = &pn->mig;
++
++	now = jiffies_to_msecs(jiffies);
++	cgroup_node_page_state_add(pn, CGROUP_PGPROMOTE_CANDIDATE, nr);
++	nr_cand = cgroup_node_page_state_get(pn, CGROUP_PGPROMOTE_CANDIDATE);
++	start = mig->nbp_rl_start;
++	if (now - start > MSEC_PER_SEC &&
++	    cmpxchg(&mig->nbp_rl_start, start, now) == start)
++		WRITE_ONCE(mig->nbp_rl_nr_cand, nr_cand);
++	if (nr_cand - mig->nbp_rl_nr_cand >= rate_limit)
++		return true;
++	return false;
++}
++
+ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 				int src_nid, int dst_cpu)
+ {
+@@ -1572,6 +1650,68 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 	int dst_nid = cpu_to_node(dst_cpu);
+ 	int last_cpupid, this_cpupid;
+ 
++	struct mem_cgroup *memcg;
++	bool mmctl_enable = false;
++	bool ret = false;
++	unsigned long max_nr_pages;
++
++	memcg = get_mem_cgroup_from_mm(p->mm);
++	if(memcg && memcg->mmctl_enabled)
++		mmctl_enable = true;
++
++	pr_debug("mmctl: should_numa_migrate src_nid=%d dst_nid=%d mmctl_enable=%d\n",
++		 src_nid, dst_nid, mmctl_enable);
++
++	if(mmctl_enable){
++		max_nr_pages = READ_ONCE(memcg->nodeinfo[dst_nid]->max_nr_base_pages);
++		pr_debug("mmctl: max_nr_pages=%lu for dst_nid=%d\n", max_nr_pages, dst_nid);
++		if(max_nr_pages == ULONG_MAX)
++			goto without_limit;
++	}
++
++	/*
++	 * Per-cgroup migration control: the upstream hot-page threshold and
++	 * promotion rate limit, kept per cgroup instead of per node.
++	 */
++	if(mmctl_enable && sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING &&
++	    !node_is_toptier(src_nid)){
++		struct pglist_data *pgdat;
++		unsigned long rate_limit;
++		unsigned int latency, th, def_th;
++
++		/*Get the target node cgroup migration policy*/
++		struct mem_cgroup_per_node* pn = memcg->nodeinfo[dst_nid];
++		struct memcg_migration_ctl *mig = &pn->mig;
++
++		pgdat = NODE_DATA(dst_nid);
++		if (memcg_free_space_enough(pgdat, memcg, max_nr_pages)) {
++			/* workload changed, reset hot threshold */
++			pr_debug("mmctl: free space enough, allowing migration\n");
++			mig->nbp_threshold = 0;
++			ret = true; goto out;
++		}
++		pr_debug("mmctl: free space NOT enough, checking threshold\n");
++
++		def_th = sysctl_numa_balancing_hot_threshold;
++		rate_limit = sysctl_numa_balancing_promote_rate_limit << \
++			(20 - PAGE_SHIFT);
++		numa_cgroup_promotion_adjust_threshold(pn, rate_limit, def_th);
++
++		th = mig->nbp_threshold ? : def_th;
++		latency = numa_hint_fault_latency(page);
++		pr_debug("mmctl: latency=%u th=%u def_th=%u\n", latency, th, def_th);
++		if (latency >= th) {
++			pr_debug("mmctl: latency too high, rejecting migration\n");
++			ret = false; goto out;
++		}
++
++		pr_debug("mmctl: checking rate limit\n");
++		ret = !numa_cgroup_promotion_rate_limit(pn, rate_limit,
++						  thp_nr_pages(page));
++		goto out;
++	}
++
++without_limit:
+ 	/*
+ 	 * The pages in slow memory node should be migrated according
+ 	 * to hot/cold instead of private/shared.
+@@ -1586,7 +1726,8 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 		if (pgdat_free_space_enough(pgdat)) {
+ 			/* workload changed, reset hot threshold */
+ 			pgdat->nbp_threshold = 0;
+-			return true;
++			ret = true;
++			goto out;
+ 		}
+ 
+ 		def_th = sysctl_numa_balancing_hot_threshold;
+@@ -1596,19 +1737,24 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 
+ 		th = pgdat->nbp_threshold ? : def_th;
+ 		latency = numa_hint_fault_latency(page);
+-		if (latency >= th)
+-			return false;
++		if (latency >= th) {
++			ret = false;
++			goto out;
++		}
+ 
+-		return !numa_promotion_rate_limit(pgdat, rate_limit,
++		ret = !numa_promotion_rate_limit(pgdat, rate_limit,
+ 						  thp_nr_pages(page));
++		goto out;
+ 	}
+ 
+ 	this_cpupid = cpu_pid_to_cpupid(dst_cpu, current->pid);
+ 	last_cpupid = page_cpupid_xchg_last(page, this_cpupid);
+ 
+ 	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+-	    !node_is_toptier(src_nid) && !cpupid_valid(last_cpupid))
+-		return false;
++	    !node_is_toptier(src_nid) && !cpupid_valid(last_cpupid)) {
++		ret = false;
++		goto out;
++	}
+ 
+ 	/*
+ 	 * Allow first faults or private faults to migrate immediately early in
+@@ -1617,8 +1763,10 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 	 * executed below.
+ 	 */
+ 	if ((p->numa_preferred_nid == NUMA_NO_NODE || p->numa_scan_seq <= 4) &&
+-	    (cpupid_pid_unset(last_cpupid) || cpupid_match_pid(p, last_cpupid)))
+-		return true;
++	    (cpupid_pid_unset(last_cpupid) || cpupid_match_pid(p, last_cpupid))) {
++		ret = true;
++		goto out;
++	}
+ 
+ 	/*
+ 	 * Multi-stage node selection is used in conjunction with a periodic
+@@ -1638,24 +1786,32 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 	 * act on an unlikely task<->page relation.
+ 	 */
+ 	if (!cpupid_pid_unset(last_cpupid) &&
+-				cpupid_to_nid(last_cpupid) != dst_nid)
+-		return false;
++				cpupid_to_nid(last_cpupid) != dst_nid) {
++		ret = false;
++		goto out;
++	}
+ 
+ 	/* Always allow migrate on private faults */
+-	if (cpupid_match_pid(p, last_cpupid))
+-		return true;
++	if (cpupid_match_pid(p, last_cpupid)) {
++		ret = true;
++		goto out;
++	}
+ 
+ 	/* A shared fault, but p->numa_group has not been set up yet. */
+-	if (!ng)
+-		return true;
++	if (!ng) {
++		ret = true;
++		goto out;
++	}
+ 
+ 	/*
+ 	 * Destination node is much more heavily used than the source
+ 	 * node? Allow migration.
+ 	 */
+ 	if (group_faults_cpu(ng, dst_nid) > group_faults_cpu(ng, src_nid) *
+-					ACTIVE_NODE_FRACTION)
+-		return true;
++					ACTIVE_NODE_FRACTION) {
++		ret = true;
++		goto out;
++	}
+ 
+ 	/*
+ 	 * Distribute memory according to CPU & memory use on each node,
+@@ -1665,8 +1821,14 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 	 * --------------- * - > ---------------
+ 	 * faults_mem(dst)   4   faults_mem(src)
+ 	 */
+-	return group_faults_cpu(ng, dst_nid) * group_faults(p, src_nid) * 3 >
++	ret = group_faults_cpu(ng, dst_nid) * group_faults(p, src_nid) * 3 >
+ 	       group_faults_cpu(ng, src_nid) * group_faults(p, dst_nid) * 4;
++	goto out;
++
++out:
++	if (memcg)
++		css_put(&memcg->css);
++	return ret;
+ }
+ 
+ /*
+@@ -10935,6 +11097,7 @@ static int load_balance(int this_cpu, struct rq *this_rq,
+ 	return ld_moved;
+ }
+ 
++
+ static inline unsigned long
+ get_sd_balance_interval(struct sched_domain *sd, int cpu_busy)
+ {
+diff --git a/mm/Kconfig b/mm/Kconfig
+index 4751031f3..98a392f1e 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -1202,6 +1202,19 @@ config LRU_GEN_STATS
+ 	  This option has a per-memcg and per-node memory overhead.
+ # }
+ 
++config MMCTL
++	bool "Enable cgroup based memory capacity control"
++	depends on MEMCG && NUMA
++	default y
++	help
++	  Per-node memory limits for each memory cgroup
++	  (memory.max_at_node<N>) and a per-cgroup demotion thread
++	  (kdemotiond) that keeps each cgroup under its limits.
++
++	  This option is required: a kernel with this patch does not
++	  build without it. Say Y.
++
++
+ source "mm/damon/Kconfig"
+ 
+ endmenu
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index 5abffe6f8..81df13210 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -64,6 +64,7 @@
+ #include <linux/psi.h>
+ #include <linux/seq_buf.h>
+ #include "internal.h"
++#include "vmscan.h"
+ #include <net/sock.h>
+ #include <net/ip.h>
+ #include "slab.h"
+@@ -73,6 +74,15 @@
+ 
+ #include <trace/events/vmscan.h>
+ 
++#include <linux/memory-tiers.h>
++
++#include <linux/mmzone.h>
++
++#include <linux/sched/sysctl.h>
++#include <linux/cpuset.h>
++#include <linux/freezer.h>
++
++
+ struct cgroup_subsys memory_cgrp_subsys __read_mostly;
+ EXPORT_SYMBOL(memory_cgrp_subsys);
+ 
+@@ -675,6 +685,9 @@ static const unsigned int memcg_vm_event_stat[] = {
+ 	PGSTEAL_KSWAPD,
+ 	PGSTEAL_DIRECT,
+ 	PGSTEAL_KHUGEPAGED,
++	PGDEMOTE_KSWAPD,
++	PGDEMOTE_DIRECT,
++	PGDEMOTE_KHUGEPAGED,
+ 	PGFAULT,
+ 	PGMAJFAULT,
+ 	PGREFILL,
+@@ -1592,6 +1605,10 @@ static void memory_stat_format(struct mem_cgroup *memcg, char *buf, int bufsize)
+ 		       memcg_events(memcg, PGSTEAL_KSWAPD) +
+ 		       memcg_events(memcg, PGSTEAL_DIRECT) +
+ 		       memcg_events(memcg, PGSTEAL_KHUGEPAGED));
++	seq_buf_printf(&s, "pgdemote %lu\n",
++		       memcg_events(memcg, PGDEMOTE_KSWAPD) +
++		       memcg_events(memcg, PGDEMOTE_DIRECT) +
++		       memcg_events(memcg, PGDEMOTE_KHUGEPAGED));
+ 
+ 	for (i = 0; i < ARRAY_SIZE(memcg_vm_event_stat); i++) {
+ 		if (memcg_vm_event_stat[i] == PGPGIN ||
+@@ -5217,6 +5234,36 @@ struct mem_cgroup *mem_cgroup_get_from_ino(unsigned long ino)
+ }
+ #endif
+ 
++#ifdef CONFIG_MMCTL
++
++/* Read a per-node cgroup counter. */
++unsigned long cgroup_node_page_state_get(struct mem_cgroup_per_node *pn,
++				    enum cgroup_node_stat_item item)
++{
++	long x = atomic_long_read(&pn->vm_stat[item]);
++	return x;
++}
++
++void cgroup_node_page_state_add(struct mem_cgroup_per_node *pn,
++					enum cgroup_node_stat_item item,
++					long delta)
++{
++	atomic_long_add(delta, &pn->vm_stat[item]);
++}
++
++/* init per node migration threshold */
++static void reset_memcg_tiering(struct mem_cgroup_per_node *pn)
++{
++	struct memcg_migration_ctl *mig = &pn->mig;
++
++	mig->nbp_threshold = 0;
++	mig->nbp_th_nr_cand = cgroup_node_page_state_get(pn, CGROUP_PGPROMOTE_CANDIDATE);
++	mig->nbp_th_start = jiffies_to_msecs(jiffies);
++
++}
++
++#endif
++
+ static int alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
+ {
+ 	struct mem_cgroup_per_node *pn;
+@@ -5235,6 +5282,17 @@ static int alloc_mem_cgroup_per_node_info(struct mem_cgroup *memcg, int node)
+ 	lruvec_init(&pn->lruvec);
+ 	pn->memcg = memcg;
+ 
++#ifdef CONFIG_MMCTL
++	pn->max_nr_base_pages = ULONG_MAX;
++	atomic_long_set(&pn->nr_node_pages, 0);
++	reset_memcg_tiering(pn);
++	pn->nid = node;
++	pn->kdemotiond = NULL;
++	memcg_kdemotiond_lock_init(pn);
++	pn->kdemotiond_order = 0;
++	init_waitqueue_head(&pn->kdemotiond_wait);
++#endif
++
+ 	memcg->nodeinfo[node] = pn;
+ 	return 0;
+ }
+@@ -5324,6 +5382,12 @@ static struct mem_cgroup *mem_cgroup_alloc(void)
+ 	spin_lock_init(&memcg->deferred_split_queue.split_queue_lock);
+ 	INIT_LIST_HEAD(&memcg->deferred_split_queue.split_queue);
+ 	memcg->deferred_split_queue.split_queue_len = 0;
++#endif
++#ifdef CONFIG_MMCTL
++	mutex_init(&memcg->mmctl_lock);
++	memcg->mmctl_enabled = false;
++	memcg->max_nr_dram_pages = ULONG_MAX;
++	atomic_long_set(&memcg->promotion_counter, 0);
+ #endif
+ 	idr_replace(&mem_cgroup_idr, memcg, memcg->id.id);
+ 	lru_gen_init_memcg(memcg);
+@@ -5413,11 +5477,40 @@ static int mem_cgroup_css_online(struct cgroup_subsys_state *css)
+ 	return -ENOMEM;
+ }
+ 
++#ifdef CONFIG_MMCTL
++static void kdemotiond_stop(struct mem_cgroup *memcg, int nid);
++
++/* Stop every kdemotiond thread of the cgroup. */
++static void kdemotiond_stop_all(struct mem_cgroup *memcg)
++{
++	int nid;
++
++	for_each_node_state(nid, N_MEMORY) {
++		struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
++
++		if (pn && pn->kdemotiond)
++			kdemotiond_stop(memcg, nid);
++	}
++}
++#endif
++
+ static void mem_cgroup_css_offline(struct cgroup_subsys_state *css)
+ {
+ 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+ 	struct mem_cgroup_event *event, *tmp;
+ 
++#ifdef CONFIG_MMCTL
++	/*
++	 * The cgroup is removed: no task can join it, and its files are gone,
++	 * so no write can start a thread again. Its page cache can keep the
++	 * memcg alive long after this, so stop kdemotiond here instead of at
++	 * css_free.
++	 */
++	mutex_lock(&memcg->mmctl_lock);
++	kdemotiond_stop_all(memcg);
++	mutex_unlock(&memcg->mmctl_lock);
++#endif
++
+ 	/*
+ 	 * Unregister events and notify userspace.
+ 	 * Notify userspace about cgroup removing only after rmdir of cgroup
+@@ -5456,6 +5549,15 @@ static void mem_cgroup_css_free(struct cgroup_subsys_state *css)
+ 	struct mem_cgroup *memcg = mem_cgroup_from_css(css);
+ 	int __maybe_unused i;
+ 
++
++#ifdef CONFIG_MMCTL
++	/*
++	 * css_offline stopped the threads. A memcg that never went online
++	 * reaches css_free without css_offline: stop any thread before the
++	 * per-node structures are freed.
++	 */
++	kdemotiond_stop_all(memcg);
++#endif
+ #ifdef CONFIG_CGROUP_WRITEBACK
+ 	for (i = 0; i < MEMCG_CGWB_FRN_CNT; i++)
+ 		wb_wait_for_completion(&memcg->cgwb_frn[i].done);
+@@ -6964,6 +7066,14 @@ static int charge_memcg(struct folio *folio, struct mem_cgroup *memcg,
+ 	css_get(&memcg->css);
+ 	commit_charge(folio, memcg);
+ 
++#ifdef CONFIG_MMCTL
++	/* Update per-node charged page counter synchronously */
++	{
++		int nid = folio_nid(folio);
++		atomic_long_add(nr_pages, &memcg->nodeinfo[nid]->nr_node_pages);
++	}
++#endif
++
+ 	local_irq_disable();
+ 	mem_cgroup_charge_statistics(memcg, nr_pages);
+ 	memcg_check_events(memcg, folio_nid(folio));
+@@ -7129,6 +7239,14 @@ static void uncharge_folio(struct folio *folio, struct uncharge_gather *ug)
+ 
+ 	nr_pages = folio_nr_pages(folio);
+ 
++#ifdef CONFIG_MMCTL
++	/* Decrement per-node charged page counter */
++	{
++		int nid = folio_nid(folio);
++		atomic_long_sub(nr_pages, &memcg->nodeinfo[nid]->nr_node_pages);
++	}
++#endif
++
+ 	if (folio_memcg_kmem(folio)) {
+ 		ug->nr_memory += nr_pages;
+ 		ug->nr_kmem += nr_pages;
+@@ -7222,6 +7340,14 @@ void mem_cgroup_migrate(struct folio *old, struct folio *new)
+ 	css_get(&memcg->css);
+ 	commit_charge(new, memcg);
+ 
++#ifdef CONFIG_MMCTL
++	/*
++	 * Count the new folio on its node. The old folio stays charged until
++	 * it is freed, and uncharge_folio() then subtracts it from its node.
++	 */
++	atomic_long_add(nr_pages, &memcg->nodeinfo[folio_nid(new)]->nr_node_pages);
++#endif
++
+ 	local_irq_save(flags);
+ 	mem_cgroup_charge_statistics(memcg, nr_pages);
+ 	memcg_check_events(memcg, folio_nid(new));
+@@ -7866,3 +7992,787 @@ static int __init mem_cgroup_swap_init(void)
+ subsys_initcall(mem_cgroup_swap_init);
+ 
+ #endif /* CONFIG_SWAP */
++
++#ifdef CONFIG_MMCTL
++
++
++bool memcg_can_demote(struct mem_cgroup *memcg)
++{
++	if (memcg_nodectl_status(memcg) && memcg->demotion_enabled)
++		return true;
++
++	return false;
++}
++
++unsigned long memcg_get_node_usedpages(struct mem_cgroup *memcg, pg_data_t *pgdat)
++{
++	struct lruvec *lruvec;
++	unsigned long nr_pages = 0;
++	enum lru_list lru;
++
++	/*
++	 * Read the per-node usage from the LRU list sizes of the cgroup on
++	 * this node. Migration moves a folio to the lruvec of the target node,
++	 * so lruvec_lru_size() counts the folios resident on this node.
++	 */
++	lruvec = mem_cgroup_lruvec(memcg, pgdat);
++
++	for_each_lru(lru)
++		nr_pages += lruvec_lru_size(lruvec, lru, MAX_NR_ZONES - 1);
++
++	return nr_pages;
++}
++
++unsigned long zone_wmark_to_memcg(struct zone *z, int wmark,
++				struct mem_cgroup *memcg, int nid)
++{
++	long managed_pages;
++	unsigned long max_nr_pages = memcg_get_node_limit(memcg, nid);
++
++	/*
++	 * No limit: kdemotiond can read this value before kdemotiond_stop()
++	 * ends it. Do not scale.
++	 */
++	if (max_nr_pages == ULONG_MAX)
++		return wmark;
++
++	managed_pages = atomic_long_read(&z->managed_pages);
++	return mult_frac(wmark, max_nr_pages, managed_pages);
++}
++
++bool memcg_watermark_ok(pg_data_t *pgdat, struct mem_cgroup *memcg,
++				unsigned int order, unsigned long mark,
++				int highest_zoneidx)
++{
++	int nid = pgdat->node_id;
++	unsigned long max_nr_pages = memcg_get_node_limit(memcg, nid);
++	unsigned long used_nr_pages = memcg_get_node_usedpages(memcg, pgdat);
++	unsigned long free_nr_pages;
++	struct zone *normal = &pgdat->node_zones[ZONE_NORMAL];
++
++	/* No limit on this node: nothing to demote. */
++	if (max_nr_pages == ULONG_MAX)
++		return true;
++
++	if (used_nr_pages > max_nr_pages)
++		return false;
++
++	free_nr_pages = max_nr_pages - used_nr_pages;
++	return _memcg_watermark_ok(normal, order, mark, highest_zoneidx,
++				free_nr_pages, max_nr_pages);
++}
++
++/* Only ZONE_NORMAL is checked. */
++bool _memcg_watermark_ok(struct zone *z, unsigned int order,
++				unsigned long mark, int highest_zoneidx,
++				unsigned long free_nr_pages,
++				unsigned long max_nr_pages)
++{
++	unsigned long free_nr_pages_scaled;
++	long managed_pages;
++
++	/* A limit of 0 pages leaves no room, and the scaling divides by it. */
++	if (!max_nr_pages)
++		return false;
++
++	managed_pages = atomic_long_read(&z->managed_pages);
++	free_nr_pages_scaled = mult_frac(free_nr_pages, managed_pages, max_nr_pages);
++
++	return __zone_watermark_ok(z, order, mark, highest_zoneidx, 0,
++				free_nr_pages_scaled);
++}
++
++static bool memcg_pgdat_balanced(pg_data_t *pgdat, struct mem_cgroup *memcg, int order)
++{
++	unsigned long mark = -1;
++	struct zone *zone = &pgdat->node_zones[ZONE_NORMAL];
++
++	if (!managed_zone(zone))
++		goto out;
++
++	mark = wmark_pages(zone, WMARK_PROMO);
++
++	if (memcg_watermark_ok(pgdat, memcg, order, mark, ZONE_NORMAL))
++		return true;
++
++out:
++	if (mark == -1)
++		return true;
++
++	return false;
++}
++
++void wakeup_kdemotiond(struct mem_cgroup_per_node *pn, struct zone *zone, gfp_t gfp_flags, int order)
++{
++	if (!managed_zone(zone))
++		return;
++
++	if (!cpuset_zone_allowed(zone, gfp_flags))
++		return;
++
++	if (READ_ONCE(pn->kdemotiond_order) < order)
++		WRITE_ONCE(pn->kdemotiond_order, order);
++
++	if (!waitqueue_active(&pn->kdemotiond_wait))
++		return;
++
++	wake_up_interruptible(&pn->kdemotiond_wait);
++}
++
++static bool prepare_kdemotiond_sleep(pg_data_t *pgdat, struct mem_cgroup *memcg, int order)
++{
++	if (memcg_pgdat_balanced(pgdat, memcg, order)) {
++		return true;
++	}
++
++	return false;
++}
++
++static void kdemotiond_try_to_sleep(pg_data_t *pgdat, struct mem_cgroup_per_node *pn,
++						int alloc_order, int reclaim_order)
++{
++	long remaining = 0;
++	DEFINE_WAIT(wait);
++
++	if (freezing(current) || kthread_should_stop())
++		return;
++
++	prepare_to_wait(&pn->kdemotiond_wait, &wait, TASK_INTERRUPTIBLE);
++
++	if (prepare_kdemotiond_sleep(pgdat, pn->memcg, reclaim_order)) {
++
++		remaining = schedule_timeout(HZ/10);
++
++		if (remaining) {
++			if (READ_ONCE(pn->kdemotiond_order) < reclaim_order)
++				WRITE_ONCE(pn->kdemotiond_order, reclaim_order);
++		}
++
++		finish_wait(&pn->kdemotiond_wait, &wait);
++		prepare_to_wait(&pn->kdemotiond_wait, &wait, TASK_INTERRUPTIBLE);
++	}
++
++	if (!remaining &&
++	    prepare_kdemotiond_sleep(pgdat, pn->memcg, reclaim_order)) {
++
++		set_pgdat_percpu_threshold(pgdat, calculate_normal_threshold);
++
++		if (!kthread_should_stop())
++			schedule();
++
++		set_pgdat_percpu_threshold(pgdat, calculate_pressure_threshold);
++	}
++
++	finish_wait(&pn->kdemotiond_wait, &wait);
++}
++
++static void kdemotiond_age_memcg(struct pglist_data *pgdat, struct scan_control *sc)
++{
++	struct lruvec *lruvec;
++
++	if (lru_gen_enabled()) {
++		BUG();
++		return;
++	}
++
++	if (!can_age_anon_pages(pgdat, sc)) {
++		pr_debug("kdemotiond_age_memcg: Cannot age anon pages, skipping\n");
++		return;
++	}
++
++	pr_debug("kdemotiond_age_memcg: Aging anon pages for memcg=%s node=%d\n",
++		 sc->target_mem_cgroup ? sc->target_mem_cgroup->css.cgroup->kn->name : "root",
++		 pgdat->node_id);
++
++	lruvec = mem_cgroup_lruvec(sc->target_mem_cgroup, pgdat);
++	shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
++				sc, LRU_ACTIVE_ANON);
++
++	pr_debug("kdemotiond_age_memcg: Finished aging\n");
++}
++
++static bool kdemotiond_shrink_node(pg_data_t *pgdat,
++			       struct scan_control *sc)
++{
++	struct zone *zone = &pgdat->node_zones[ZONE_NORMAL];
++	unsigned long wmark = zone_wmark_to_memcg(zone, high_wmark_pages(zone),
++								sc->target_mem_cgroup, pgdat->node_id);
++	unsigned long nr_reclaimed_before = sc->nr_reclaimed;
++	unsigned long nr_scanned_before = sc->nr_scanned;
++
++	sc->nr_to_reclaim = max(wmark, SWAP_CLUSTER_MAX);
++
++	pr_debug("kdemotiond_shrink_node: node=%d wmark=%lu nr_to_reclaim=%lu\n",
++		 pgdat->node_id, wmark, sc->nr_to_reclaim);
++
++	shrink_node(pgdat, sc);
++
++	pr_debug("kdemotiond_shrink_node: Shrunk node, reclaimed=%lu scanned=%lu (delta: +%lu/+%lu)\n",
++		 sc->nr_reclaimed, sc->nr_scanned,
++		 sc->nr_reclaimed - nr_reclaimed_before,
++		 sc->nr_scanned - nr_scanned_before);
++
++	if (sc->order && sc->nr_reclaimed >= compact_gap(sc->order))
++		sc->order = 0;
++
++	return sc->nr_scanned >= sc->nr_to_reclaim;
++}
++
++/*
++ * For kswapd, balance_pgdat() will reclaim pages across a node from zones
++ * that are eligible for use by the caller until at least one zone is
++ * balanced.
++ *
++ * Returns the order kswapd finished reclaiming at.
++ *
++ * kswapd scans the zones in the highmem->normal->dma direction.  It skips
++ * zones which have free_pages > high_wmark_pages(zone), but once a zone is
++ * found to have free_pages <= high_wmark_pages(zone), any page in that zone
++ * or lower is eligible for reclaim until at least one usable zone is
++ * balanced.
++ */
++static int memcg_balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx,
++					struct mem_cgroup_per_node *pn, bool *no_progress)
++{
++	int i;
++	unsigned long pflags;
++	unsigned long nr_boost_reclaim;
++	unsigned long zone_boosts[MAX_NR_ZONES] = { 0, };
++	bool boosted;
++	struct zone *zone;
++	struct scan_control sc = {
++		.gfp_mask = GFP_KERNEL,
++		.order = order,
++		.may_unmap = 1,
++	};
++
++	struct mem_cgroup *memcg = pn->memcg;
++	sc.target_mem_cgroup = memcg;
++	*no_progress = false;
++
++	pr_debug("memcg_balance_pgdat: Start for memcg=%s node=%d order=%d highest_zoneidx=%d\n",
++		 memcg ? memcg->css.cgroup->kn->name : "root", pgdat->node_id, order, highest_zoneidx);
++
++	set_task_reclaim_state(current, &sc.reclaim_state);
++	psi_memstall_enter(&pflags);
++	__fs_reclaim_acquire(_THIS_IP_);
++
++	count_vm_event(PAGEOUTRUN);
++
++	/*
++	 * Account for the reclaim boost. Note that the zone boost is left in
++	 * place so that parallel allocations that are near the watermark will
++	 * stall or direct reclaim until kswapd is finished.
++	 */
++	nr_boost_reclaim = 0;
++	for (i = 0; i <= highest_zoneidx; i++) {
++		zone = pgdat->node_zones + i;
++		if (!managed_zone(zone))
++			continue;
++
++		nr_boost_reclaim += zone->watermark_boost;
++		zone_boosts[i] = zone->watermark_boost;
++	}
++	boosted = nr_boost_reclaim;
++
++restart:
++	set_reclaim_active(pgdat, highest_zoneidx);
++	sc.priority = DEF_PRIORITY;
++	pr_debug("memcg_balance_pgdat: Entering reclaim loop, boosted=%d nr_boost_reclaim=%lu\n",
++		 boosted, nr_boost_reclaim);
++	do {
++		unsigned long nr_reclaimed = sc.nr_reclaimed;
++		bool raise_priority = true;
++		bool balanced;
++		bool ret;
++
++		sc.reclaim_idx = highest_zoneidx;
++
++		balanced = memcg_pgdat_balanced(pgdat, memcg, sc.order);
++		pr_debug("memcg_balance_pgdat: priority=%d balanced=%d nr_boost_reclaim=%lu total_reclaimed=%lu\n",
++			 sc.priority, balanced, nr_boost_reclaim, sc.nr_reclaimed);
++		if (!balanced && nr_boost_reclaim) {
++			nr_boost_reclaim = 0;
++			goto restart;
++		}
++
++		if (!nr_boost_reclaim && balanced)
++			goto out;
++
++		if (nr_boost_reclaim && sc.priority == DEF_PRIORITY - 2)
++			raise_priority = false;
++
++		sc.may_writepage = !laptop_mode && !nr_boost_reclaim;
++		sc.may_swap = !nr_boost_reclaim;
++
++		/*
++		 * Do some background aging, to give pages a chance to be
++		 * referenced before reclaiming. All pages are rotated
++		 * regardless of classzone as this is about consistent aging.
++		 */
++		pr_debug("memcg_balance_pgdat: Calling kdemotiond_age_memcg, priority=%d\n", sc.priority);
++		/*
++		 * Flush the per-CPU pagevecs, so that recently faulted pages
++		 * are on the LRU lists that kdemotiond scans.
++		 */
++		lru_add_drain_all();
++		kdemotiond_age_memcg(pgdat, &sc);
++		pr_debug("memcg_balance_pgdat: After kdemotiond_age_memcg\n");
++
++		if (sc.priority < DEF_PRIORITY - 2)
++			sc.may_writepage = 1;
++
++		/* Assume there is no soft limit*/
++		sc.nr_scanned = 0;
++
++		/*
++		 * There should be no need to raise the scanning priority if
++		 * enough pages are already being scanned that that high
++		 * watermark would be met at 100% efficiency.
++		 */
++		pr_debug("memcg_balance_pgdat: Calling kdemotiond_shrink_node, nr_scanned=%lu\n", sc.nr_scanned);
++		if (kdemotiond_shrink_node(pgdat, &sc))
++			raise_priority = false;
++		pr_debug("memcg_balance_pgdat: After kdemotiond_shrink_node, nr_scanned=%lu raise_priority=%d\n",
++			 sc.nr_scanned, raise_priority);
++
++		/*
++		 * If the low watermark is met there is no need for processes
++		 * to be throttled on pfmemalloc_wait as they should not be
++		 * able to safely make forward progress. Wake them
++		 */
++
++		/* Check if kswapd should be suspending */
++		__fs_reclaim_release(_THIS_IP_);
++		ret = try_to_freeze();
++		__fs_reclaim_acquire(_THIS_IP_);
++		if (ret || kthread_should_stop())
++			break;
++
++		/*
++		 * Raise priority if scanning rate is too low or there was no
++		 * progress in reclaiming pages
++		 */
++		nr_reclaimed = sc.nr_reclaimed - nr_reclaimed;
++		nr_boost_reclaim -= min(nr_boost_reclaim, nr_reclaimed);
++
++		pr_debug("memcg_balance_pgdat: Round reclaimed=%lu total_reclaimed=%lu nr_boost_reclaim=%lu\n",
++			 nr_reclaimed, sc.nr_reclaimed, nr_boost_reclaim);
++
++		/*
++		 * If reclaim made no progress for a boost, stop reclaim as
++		 * IO cannot be queued and it could be an infinite loop in
++		 * extreme circumstances.
++		 */
++		if (nr_boost_reclaim && !nr_reclaimed)
++			break;
++
++		if (raise_priority || !nr_reclaimed)
++			sc.priority--;
++	} while (sc.priority >= 1);
++
++	if (!sc.nr_reclaimed) {
++		pgdat->kswapd_failures++;
++		/* The cgroup was not balanced, and this round freed nothing. */
++		*no_progress = true;
++	}
++
++out:
++	pr_debug("memcg_balance_pgdat: Exiting, total_reclaimed=%lu final_priority=%d\n",
++		 sc.nr_reclaimed, sc.priority);
++	clear_reclaim_active(pgdat, highest_zoneidx);
++
++	/* If reclaim was boosted, account for the reclaim done in this pass */
++	if (boosted) {
++		unsigned long flags;
++
++		for (i = 0; i <= highest_zoneidx; i++) {
++			if (!zone_boosts[i])
++				continue;
++
++			/* Increments are under the zone lock */
++			zone = pgdat->node_zones + i;
++			spin_lock_irqsave(&zone->lock, flags);
++			zone->watermark_boost -= min(zone->watermark_boost, zone_boosts[i]);
++			spin_unlock_irqrestore(&zone->lock, flags);
++		}
++
++		/*
++		 * As there is now likely space, wakeup kcompact to defragment
++		 * pageblocks.
++		 */
++		wakeup_kcompactd(pgdat, pageblock_order, highest_zoneidx);
++	}
++
++	snapshot_refaults(memcg, pgdat);
++	__fs_reclaim_release(_THIS_IP_);
++	psi_memstall_leave(&pflags);
++	set_task_reclaim_state(current, NULL);
++
++	/*
++	 * Return the order kswapd stopped reclaiming at as
++	 * prepare_kswapd_sleep() takes it into account. If another caller
++	 * entered the allocator slow path while kswapd was awake, order will
++	 * remain at the higher level.
++	 */
++	return sc.order;
++}
++
++static int kdemotiond(void *p)
++{
++	unsigned int alloc_order, reclaim_order;
++	struct mem_cgroup_per_node *pn = (struct mem_cgroup_per_node *)p;
++	struct task_struct *tsk = current;
++	const struct cpumask *cpumask = cpumask_of_node(pn->nid);
++	pg_data_t *pgdat = NODE_DATA(pn->nid);
++
++	if (!cpumask_empty(cpumask))
++		set_cpus_allowed_ptr(tsk, cpumask);
++
++	tsk->flags |= PF_MEMALLOC | PF_KSWAPD;
++	set_freezable();
++
++	WRITE_ONCE(pn->kdemotiond_order, 0);
++	for (;;) {
++		bool ret, no_progress;
++
++		alloc_order = reclaim_order = READ_ONCE(pn->kdemotiond_order);
++
++kdemotiond_try_sleep:
++		kdemotiond_try_to_sleep(pgdat, pn, alloc_order, reclaim_order);
++
++		alloc_order = READ_ONCE(pn->kdemotiond_order);
++		WRITE_ONCE(pn->kdemotiond_order, 0);
++
++		ret = try_to_freeze();
++		if (kthread_should_stop())
++			break;
++
++		/*
++		 * We can speed up thawing tasks if we don't call balance_pgdat
++		 * after returning from the refrigerator
++		 */
++		if (ret)
++			continue;
++
++		/*
++		 * Reclaim begins at the requested order but if a high-order
++		 * reclaim fails then kswapd falls back to reclaiming for
++		 * order-0. If that happens, kswapd will consider sleeping
++		 * for the order it finished reclaiming at (reclaim_order)
++		 * but kcompactd is woken to compact for the original
++		 * request (alloc_order).
++		 */
++		reclaim_order = memcg_balance_pgdat(pgdat, alloc_order, ZONE_NORMAL, pn,
++						    &no_progress);
++		/*
++		 * A round that reclaims nothing leaves the cgroup unbalanced,
++		 * so kdemotiond_try_to_sleep() would not sleep and the next
++		 * round would start at once. Nap for 100 ms first, as after a
++		 * balanced round. A refused promotion does not end this nap: it
++		 * only records its order, which the next round uses.
++		 */
++		if (no_progress && !kthread_should_stop())
++			schedule_timeout_interruptible(HZ / 10);
++		if (reclaim_order < alloc_order)
++			goto kdemotiond_try_sleep;
++	}
++
++	tsk->flags &= ~(PF_MEMALLOC | PF_KSWAPD);
++
++	return 0;
++}
++
++/*
++ * Start the cgroup's kdemotiond for node nid. Returns 0, or the error of
++ * kthread_run(). The cgroup file write that asked for the thread returns
++ * that error, so the writer sees that no thread enforces the limit.
++ */
++static int kdemotiond_run(struct mem_cgroup *memcg, int nid)
++{
++	char cgname[NAME_MAX];
++	struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
++	struct task_struct *tsk;
++	int err = 0;
++
++	cgroup_name(memcg->css.cgroup, cgname, sizeof(cgname));
++	memcg_kdemotiond_lock(pn);
++	if (!pn->kdemotiond) {
++		tsk = kthread_run(kdemotiond, pn, "kdemotiond_%s_%d", cgname, nid);
++		if (IS_ERR(tsk)) {
++			/* failure at boot is fatal */
++			BUG_ON(system_state < SYSTEM_RUNNING);
++			err = PTR_ERR(tsk);
++			pr_err("Failed to start kdemotiond_%s_%d: %d\n", cgname, nid, err);
++		} else {
++			pn->kdemotiond = tsk;
++		}
++	}
++	memcg_kdemotiond_unlock(pn);
++	return err;
++}
++
++/* Start kdemotiond for every node of the cgroup that has a limit. */
++static int kdemotiond_run_limited(struct mem_cgroup *memcg)
++{
++	int nid, err = 0;
++
++	for_each_node_state(nid, N_MEMORY) {
++		struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
++
++		if (pn->max_nr_base_pages != ULONG_MAX && !pn->kdemotiond) {
++			int ret = kdemotiond_run(memcg, nid);
++
++			if (ret && !err)
++				err = ret;
++		}
++	}
++	return err;
++}
++
++static void kdemotiond_stop(struct mem_cgroup *memcg, int nid)
++{
++	struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
++	struct task_struct *kdemotiond;
++
++	memcg_kdemotiond_lock(pn);
++	kdemotiond = pn->kdemotiond;
++	if (kdemotiond) {
++		kthread_stop(kdemotiond);
++		pn->kdemotiond = NULL;
++	}
++	memcg_kdemotiond_unlock(pn);
++}
++
++static int memcg_htmm_show(struct seq_file *m, void *v)
++{
++    struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
++
++    if (memcg->mmctl_enabled)
++	seq_printf(m, "[enabled] disabled\n");
++    else
++	seq_printf(m, "enabled [disabled]\n");
++
++    return 0;
++}
++
++static ssize_t memcg_htmm_write(struct kernfs_open_file *of,
++	char *buf, size_t nbytes, loff_t off)
++{
++	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
++	int err = 0;
++
++	mutex_lock(&memcg->mmctl_lock);
++	if (sysfs_streq(buf, "enabled")) {
++		memcg->mmctl_enabled = true;
++		/* Start kdemotiond for nodes with finite limits */
++		if (memcg->demotion_enabled)
++			err = kdemotiond_run_limited(memcg);
++	} else if (sysfs_streq(buf, "disabled")) {
++		memcg->mmctl_enabled = false;
++		kdemotiond_stop_all(memcg);
++	} else {
++		err = -EINVAL;
++	}
++	mutex_unlock(&memcg->mmctl_lock);
++
++	return err ? err : nbytes;
++}
++
++static struct cftype memcg_htmm_file[] = {
++    {
++	.name = "mmctl_enabled",
++	.flags = CFTYPE_NOT_ON_ROOT,
++	.seq_show = memcg_htmm_show,
++	.write = memcg_htmm_write,
++    },
++    {}, /* terminate */
++};
++
++static int __init mem_cgroup_htmm_init(void)
++{
++    WARN_ON(cgroup_add_dfl_cftypes(&memory_cgrp_subsys,
++		memcg_htmm_file));
++    return 0;
++}
++subsys_initcall(mem_cgroup_htmm_init);
++
++static int memcg_per_node_max_show(struct seq_file *m, void *v)
++{
++    struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
++    struct cftype *cur_file = seq_cft(m);
++    int nid = cur_file->numa_node_id;
++    unsigned long max = READ_ONCE(memcg->nodeinfo[nid]->max_nr_base_pages);
++
++    if (max == ULONG_MAX)
++	seq_puts(m, "max\n");
++    else
++	seq_printf(m, "%llu\n", (u64)max * PAGE_SIZE);
++
++    return 0;
++}
++
++static ssize_t memcg_per_node_max_write(struct kernfs_open_file *of,
++	char *buf, size_t nbytes, loff_t off)
++{
++	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
++	struct cftype *cur_file = of_cft(of);
++	int nid = cur_file->numa_node_id;
++	unsigned long max, nr_dram_pages = 0;
++	int err, n;
++	struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
++
++	buf = strstrip(buf);
++	err = page_counter_memparse(buf, "max", &max);
++	if (err)
++		return err;
++
++	/*
++	 * page_counter_memparse() stores PAGE_COUNTER_MAX for "max" and caps
++	 * larger byte values at it. Every "no limit" test of this field
++	 * compares with ULONG_MAX, the initial value, so store ULONG_MAX.
++	 */
++	if (max == PAGE_COUNTER_MAX)
++		max = ULONG_MAX;
++
++	mutex_lock(&memcg->mmctl_lock);
++	xchg(&memcg->nodeinfo[nid]->max_nr_base_pages, max);
++
++	for_each_node_state(n, N_MEMORY) {
++		if (node_is_toptier(n)) {
++			if (memcg->nodeinfo[n]->max_nr_base_pages != ULONG_MAX)
++				nr_dram_pages += memcg->nodeinfo[n]->max_nr_base_pages;
++		}
++	}
++	if (nr_dram_pages)
++		memcg->max_nr_dram_pages = nr_dram_pages;
++
++	if (max == ULONG_MAX && pn->kdemotiond) {
++		kdemotiond_stop(memcg, nid);
++	} else if (max != ULONG_MAX && memcg->mmctl_enabled &&
++		   memcg->demotion_enabled && !pn->kdemotiond) {
++		err = kdemotiond_run(memcg, nid);
++	}
++	mutex_unlock(&memcg->mmctl_lock);
++
++	return err ? err : nbytes;
++}
++
++static int pgdat_memcg_htmm_init(struct pglist_data *pgdat)
++{
++    pgdat->memcg_htmm_file = kzalloc(2 * sizeof(struct cftype), GFP_KERNEL);
++    if (!pgdat->memcg_htmm_file) {
++	pr_err("Failed to allocate pgdat->memcg_htmm_file\n");
++	return -ENOMEM;
++    }
++#ifdef CONFIG_LOCKDEP
++    lockdep_register_key(&(pgdat->memcg_htmm_file->lockdep_key));
++#endif
++    return 0;
++}
++
++int mem_cgroup_per_node_htmm_init(void)
++{
++    int nid;
++
++    for_each_node_state(nid, N_MEMORY) {
++	struct pglist_data *pgdat = NODE_DATA(nid);
++
++	if (!pgdat || pgdat->memcg_htmm_file)
++	    continue;
++	if (pgdat_memcg_htmm_init(pgdat))
++	    continue;
++
++	snprintf(pgdat->memcg_htmm_file[0].name, MAX_CFTYPE_NAME,
++		"max_at_node%d", nid);
++	pgdat->memcg_htmm_file[0].flags = CFTYPE_NOT_ON_ROOT;
++	pgdat->memcg_htmm_file[0].seq_show = memcg_per_node_max_show;
++	pgdat->memcg_htmm_file[0].write = memcg_per_node_max_write;
++	pgdat->memcg_htmm_file[0].numa_node_id = nid;
++
++	WARN_ON(cgroup_add_dfl_cftypes(&memory_cgrp_subsys,
++		    pgdat->memcg_htmm_file));
++    }
++    return 0;
++}
++subsys_initcall(mem_cgroup_per_node_htmm_init);
++
++static int memcg_demotion_show(struct seq_file *m, void *v)
++{
++    struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
++
++    if (memcg->demotion_enabled)
++		seq_printf(m, "[enabled] disabled\n");
++    else
++		seq_printf(m, "enabled [disabled]\n");
++
++    return 0;
++}
++
++static ssize_t memcg_demotion_write(struct kernfs_open_file *of,
++	char *buf, size_t nbytes, loff_t off)
++{
++	struct mem_cgroup *memcg = mem_cgroup_from_css(of_css(of));
++	int err = 0;
++
++	mutex_lock(&memcg->mmctl_lock);
++	if (sysfs_streq(buf, "enabled")) {
++		memcg->demotion_enabled = true;
++		/* Start kdemotiond for nodes with finite limits */
++		if (memcg->mmctl_enabled)
++			err = kdemotiond_run_limited(memcg);
++	} else if (sysfs_streq(buf, "disabled")) {
++		memcg->demotion_enabled = false;
++		kdemotiond_stop_all(memcg);
++	} else {
++		err = -EINVAL;
++	}
++	mutex_unlock(&memcg->mmctl_lock);
++
++	return err ? err : nbytes;
++}
++
++static struct cftype memcg_demotion_file[] = {
++    {
++	.name = "demotion",
++	.flags = CFTYPE_NOT_ON_ROOT,
++	.seq_show = memcg_demotion_show,
++	.write = memcg_demotion_write,
++    },
++    {}, /* terminate */
++};
++
++static int __init mem_cgroup_demotion_init(void)
++{
++    WARN_ON(cgroup_add_dfl_cftypes(&memory_cgrp_subsys,
++		memcg_demotion_file));
++    return 0;
++}
++subsys_initcall(mem_cgroup_demotion_init);
++
++static int memcg_promotion_counter_show(struct seq_file *m, void *v)
++{
++    struct mem_cgroup *memcg = mem_cgroup_from_css(seq_css(m));
++	seq_printf(m, "cgroup_promotion:%ld\n", atomic_long_read(&memcg->promotion_counter));
++
++    return 0;
++}
++
++static struct cftype memcg_counter_file[] = {
++    {
++	.name = "promotion_counter",
++	.flags = CFTYPE_NOT_ON_ROOT,
++	.seq_show = memcg_promotion_counter_show,
++    },
++    {}, /* terminate */
++};
++
++static int __init mem_cgroup_counter_init(void)
++{
++    WARN_ON(cgroup_add_dfl_cftypes(&memory_cgrp_subsys,
++		memcg_counter_file));
++    return 0;
++}
++subsys_initcall(mem_cgroup_counter_init);
++
++#endif
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index 2068b594d..075849300 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -71,6 +71,7 @@
+ #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+ 
+ #include <linux/mempolicy.h>
++#include <linux/memory-tiers.h>
+ #include <linux/pagewalk.h>
+ #include <linux/highmem.h>
+ #include <linux/hugetlb.h>
+@@ -2140,6 +2141,65 @@ static struct page *alloc_pages_preferred_many(gfp_t gfp, unsigned int order,
+ 	return page;
+ }
+ 
++#ifdef CONFIG_MMCTL
++/*
++ * The node for a new page of a task whose memory cgroup has per-node limits
++ * (memory.max_at_node<N>). Let nid be the node of the faulting CPU, or the
++ * first node of an MPOL_PREFERRED policy. Below its limit on nid the page
++ * comes from nid; at the limit it comes from the next lower tier of nid,
++ * unless that node is at its limit too. Returns NUMA_NO_NODE when the
++ * memory policy decides: no limits, no limit on nid, no lower tier, or
++ * both nodes at their limits.
++ *
++ * The memcg of current is read under RCU and pinned with css_tryget(), so
++ * a concurrent move of the task to another cgroup cannot free it here.
++ */
++static int mmctl_alloc_node(struct mempolicy *pol, int node, int order)
++{
++	struct mem_cgroup *memcg;
++	unsigned long max_nr_pages;
++	int nid = pol->mode == MPOL_PREFERRED ? first_node(pol->nodes) : node;
++	unsigned int nr_pages = 1U << order;
++	int ret = NUMA_NO_NODE;
++
++	rcu_read_lock();
++	memcg = mem_cgroup_from_task(current);
++	if (memcg && !css_tryget(&memcg->css))
++		memcg = NULL;
++	rcu_read_unlock();
++	if (!memcg)
++		return NUMA_NO_NODE;
++
++	if (!memcg_nodectl_status(memcg))
++		goto out;
++
++	max_nr_pages = memcg_get_node_limit(memcg, nid);
++	if (max_nr_pages == ULONG_MAX)
++		goto out;
++
++	if (max_nr_pages <= memcg_get_node_usedpages(memcg, NODE_DATA(nid)) + nr_pages) {
++		int fallback_nid = next_demotion_node(nid);
++		unsigned long fallback_limit;
++
++		/* No demotion target: the memory policy decides. */
++		if (fallback_nid == NUMA_NO_NODE)
++			goto out;
++
++		/* Fallback node also at limit: the memory policy decides. */
++		fallback_limit = memcg_get_node_limit(memcg, fallback_nid);
++		if (fallback_limit != ULONG_MAX &&
++		    fallback_limit <= memcg_get_node_usedpages(memcg, NODE_DATA(fallback_nid)) +
++				      nr_pages)
++			goto out;
++		nid = fallback_nid;
++	}
++	ret = nid;
++out:
++	css_put(&memcg->css);
++	return ret;
++}
++#endif
++
+ /**
+  * vma_alloc_folio - Allocate a folio for a VMA.
+  * @gfp: GFP flags.
+@@ -2180,6 +2240,18 @@ struct folio *vma_alloc_folio(gfp_t gfp, int order, struct vm_area_struct *vma,
+ 		goto out;
+ 	}
+ 
++#ifdef CONFIG_MMCTL /* alloc_pages_vma() */
++	if (vma && vma->vm_mm) {
++		int nid = mmctl_alloc_node(pol, node, order);
++
++		if (nid != NUMA_NO_NODE) {
++			mpol_cond_put(pol);
++			folio = __folio_alloc_node(gfp | __GFP_THISNODE, order, nid);
++			goto out;
++		}
++	}
++#endif
++
+ 	if (pol->mode == MPOL_PREFERRED_MANY) {
+ 		struct page *page;
+ 
+diff --git a/mm/migrate.c b/mm/migrate.c
+index db3f15444..e84b46e5a 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -2093,6 +2093,85 @@ static int do_move_pages_to_node(struct mm_struct *mm,
+ 	return err;
+ }
+ 
++#ifdef CONFIG_MMCTL
++
++/*
++ * Returns true if this is a safe migration target node for misplaced NUMA
++ * pages. Currently it only checks the watermarks which is crude.
++ */
++static bool migrate_balanced_pgdat(struct pglist_data *pgdat,
++				   unsigned long nr_migrate_pages)
++{
++	int z;
++
++	for (z = pgdat->nr_zones - 1; z >= 0; z--) {
++		struct zone *zone = pgdat->node_zones + z;
++
++		if (!managed_zone(zone))
++			continue;
++
++		/* Avoid waking kswapd by allocating pages_to_migrate pages. */
++		if (!zone_watermark_ok(zone, 0,
++				       high_wmark_pages(zone) +
++				       nr_migrate_pages,
++				       ZONE_MOVABLE, 0))
++			continue;
++		return true;
++	}
++	return false;
++}
++
++static bool cgroup_migrate_balanced_pgdat(struct pglist_data *pgdat,
++				   unsigned long nr_migrate_pages, struct mem_cgroup *memcg, int node)
++{
++	struct zone *normal = &pgdat->node_zones[ZONE_NORMAL];
++	unsigned long max_nr_pages, used_nr_pages, free_nr_pages;
++	max_nr_pages = memcg_get_node_limit(memcg, node);
++	used_nr_pages = memcg_get_node_usedpages(memcg, pgdat);
++
++	if (max_nr_pages == ULONG_MAX)
++		return true;
++
++	if (used_nr_pages > max_nr_pages)
++		free_nr_pages = 0;
++	else
++		free_nr_pages = max_nr_pages - used_nr_pages;
++
++	return _memcg_watermark_ok(normal, 0,
++				       high_wmark_pages(normal) +
++				       nr_migrate_pages,
++				       ZONE_MOVABLE, free_nr_pages, max_nr_pages);
++}
++
++/*
++ * The node limit check of move_pages(2). nr_migrate_pages counts the page
++ * to move and the pages queued earlier in the same call, which are not on
++ * this node until the queue migrates. They are subtracted from the free
++ * space under the limit before the scaling to the zone size, so that the
++ * count needs its real room under the limit. The NUMA balancing check above
++ * keeps its own order.
++ */
++static bool cgroup_move_pages_room_ok(struct pglist_data *pgdat,
++				unsigned long nr_migrate_pages, struct mem_cgroup *memcg, int node)
++{
++	struct zone *normal = &pgdat->node_zones[ZONE_NORMAL];
++	unsigned long max_nr_pages, used_nr_pages, free_nr_pages;
++
++	max_nr_pages = memcg_get_node_limit(memcg, node);
++	if (max_nr_pages == ULONG_MAX)
++		return true;
++
++	used_nr_pages = memcg_get_node_usedpages(memcg, pgdat);
++	if (used_nr_pages + nr_migrate_pages >= max_nr_pages)
++		return false;
++	free_nr_pages = max_nr_pages - used_nr_pages - nr_migrate_pages;
++
++	return _memcg_watermark_ok(normal, 0, high_wmark_pages(normal),
++				       ZONE_MOVABLE, free_nr_pages, max_nr_pages);
++}
++
++#endif
++
+ /*
+  * Resolves the given address to a struct page, isolates it from the LRU and
+  * puts it to the given pagelist.
+@@ -2101,10 +2180,16 @@ static int do_move_pages_to_node(struct mm_struct *mm,
+  *     0 - when it doesn't have to be migrated because it is already on the
+  *         target node
+  *     1 - when it has been queued
++ *
++ * *nr_queued counts the pages queued for @node since the queue last
++ * migrated. The per-cgroup node limit check adds them to this page,
++ * and a successful isolation adds this page to them.
+  */
+ static int add_page_for_migration(struct mm_struct *mm, unsigned long addr,
+-		int node, struct list_head *pagelist, bool migrate_all)
++		int node, struct list_head *pagelist, bool migrate_all,
++		unsigned long *nr_queued)
+ {
++	pg_data_t *pgdat = NODE_DATA(node);
+ 	struct vm_area_struct *vma;
+ 	struct page *page;
+ 	int err;
+@@ -2144,9 +2229,30 @@ static int add_page_for_migration(struct mm_struct *mm, unsigned long addr,
+ 			err = isolated ? 1 : -EBUSY;
+ 		}
+ 	} else {
+-		struct page *head;
++		struct page *head = compound_head(page);
++		int nr_pages = thp_nr_pages(head);
++		int order = compound_order(head);
++		struct mem_cgroup *memcg = get_mem_cgroup_from_mm(vma->vm_mm);
++		struct mem_cgroup_per_node *pn = NULL;
++		bool mmctl_enable = memcg_nodectl_status(memcg);
++
++		if (mmctl_enable && !cgroup_move_pages_room_ok(pgdat,
++				*nr_queued + nr_pages, memcg, node)) {
++			struct zone *normal = &pgdat->node_zones[ZONE_NORMAL];
++			pn = memcg->nodeinfo[node];
++
++			pr_debug("[move_pages] waking up kdemotiond, fast tier is in high mark\n");
++
++			wakeup_kdemotiond(pn, normal, 0, order);
++			err = -ENOMEM;
++			if (memcg)
++				css_put(&memcg->css);
++			goto out_putpage;
++		}
++
++		if (memcg)
++			css_put(&memcg->css);
+ 
+-		head = compound_head(page);
+ 		isolated = isolate_lru_page(head);
+ 		if (!isolated) {
+ 			err = -EBUSY;
+@@ -2158,6 +2264,7 @@ static int add_page_for_migration(struct mm_struct *mm, unsigned long addr,
+ 		mod_node_page_state(page_pgdat(head),
+ 			NR_ISOLATED_ANON + page_is_file_lru(head),
+ 			thp_nr_pages(head));
++		*nr_queued += nr_pages;
+ 	}
+ out_putpage:
+ 	/*
+@@ -2211,6 +2318,8 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
+ 	LIST_HEAD(pagelist);
+ 	int start, i;
+ 	int err = 0, err1;
++	/* Pages queued for current_node since the queue last migrated. */
++	unsigned long nr_queued = 0;
+ 
+ 	lru_cache_disable();
+ 
+@@ -2239,6 +2348,7 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
+ 		if (current_node == NUMA_NO_NODE) {
+ 			current_node = node;
+ 			start = i;
++			nr_queued = 0;
+ 		} else if (node != current_node) {
+ 			err = move_pages_and_store_status(mm, current_node,
+ 					&pagelist, status, start, i, nr_pages);
+@@ -2246,6 +2356,7 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
+ 				goto out;
+ 			start = i;
+ 			current_node = node;
++			nr_queued = 0;
+ 		}
+ 
+ 		/*
+@@ -2253,7 +2364,7 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
+ 		 * report them via status
+ 		 */
+ 		err = add_page_for_migration(mm, addr, current_node,
+-				&pagelist, flags & MPOL_MF_MOVE_ALL);
++				&pagelist, flags & MPOL_MF_MOVE_ALL, &nr_queued);
+ 
+ 		if (err > 0) {
+ 			/* The page is successfully queued for migration */
+@@ -2485,31 +2596,6 @@ SYSCALL_DEFINE6(move_pages, pid_t, pid, unsigned long, nr_pages,
+ }
+ 
+ #ifdef CONFIG_NUMA_BALANCING
+-/*
+- * Returns true if this is a safe migration target node for misplaced NUMA
+- * pages. Currently it only checks the watermarks which is crude.
+- */
+-static bool migrate_balanced_pgdat(struct pglist_data *pgdat,
+-				   unsigned long nr_migrate_pages)
+-{
+-	int z;
+-
+-	for (z = pgdat->nr_zones - 1; z >= 0; z--) {
+-		struct zone *zone = pgdat->node_zones + z;
+-
+-		if (!managed_zone(zone))
+-			continue;
+-
+-		/* Avoid waking kswapd by allocating pages_to_migrate pages. */
+-		if (!zone_watermark_ok(zone, 0,
+-				       high_wmark_pages(zone) +
+-				       nr_migrate_pages,
+-				       ZONE_MOVABLE, 0))
+-			continue;
+-		return true;
+-	}
+-	return false;
+-}
+ 
+ static struct page *alloc_misplaced_dst_page(struct page *page,
+ 					   unsigned long data)
+@@ -2531,10 +2617,12 @@ static struct page *alloc_misplaced_dst_page(struct page *page,
+ 	return &new->page;
+ }
+ 
+-static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
++static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page, struct mem_cgroup *memcg, int node)
+ {
+ 	int nr_pages = thp_nr_pages(page);
+ 	int order = compound_order(page);
++	bool mmctl_enable = memcg_nodectl_status(memcg);
++	struct mem_cgroup_per_node *pn = NULL;
+ 
+ 	VM_BUG_ON_PAGE(order && !PageTransHuge(page), page);
+ 
+@@ -2556,6 +2644,21 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
+ 		return 0;
+ 	}
+ 
++	pr_debug("[numamigrate_isolate] mmctl_enable=%d, node=%d, nr_pages=%d\n",
++	         mmctl_enable, node, nr_pages);
++
++	if (mmctl_enable && !cgroup_migrate_balanced_pgdat(pgdat, nr_pages, memcg, node)) {
++		struct zone *normal = &pgdat->node_zones[ZONE_NORMAL];
++		pn = memcg->nodeinfo[node];
++
++		if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING))
++			return 0;
++
++		pr_debug("[numamigrate_isolate] waking up kdemotiond, fast tier is in high mark\n");
++		wakeup_kdemotiond(pn, normal, 0, order);
++		return 0;
++	}
++
+ 	if (!isolate_lru_page(page))
+ 		return 0;
+ 
+@@ -2567,6 +2670,11 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
+ 	 * caller's reference can be safely dropped without the page
+ 	 * disappearing underneath us during migration.
+ 	 */
++	/*
++	 * NOTE: Do NOT css_put(memcg) here - the caller
++	 * migrate_misplaced_page() handles the memcg ref
++	 * consistently for both success and failure paths.
++	 */
+ 	put_page(page);
+ 	return 1;
+ }
+@@ -2575,6 +2683,7 @@ static int numamigrate_isolate_page(pg_data_t *pgdat, struct page *page)
+  * Attempt to migrate a misplaced page to the specified destination
+  * node. Caller is expected to have an elevated reference count on
+  * the page that will be dropped by this function before returning.
++ * With CONFIG_MMCTL, the node limits of the page's memory cgroup also apply.
+  */
+ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
+ 			   int node)
+@@ -2586,6 +2695,9 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
+ 	LIST_HEAD(migratepages);
+ 	int nr_pages = thp_nr_pages(page);
+ 
++	struct mem_cgroup *memcg;
++	memcg = get_mem_cgroup_from_mm(vma->vm_mm);
++
+ 	/*
+ 	 * Don't migrate file pages that are mapped in multiple processes
+ 	 * with execute permissions as they are probably shared libraries.
+@@ -2601,7 +2713,7 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
+ 	if (page_is_file_lru(page) && PageDirty(page))
+ 		goto out;
+ 
+-	isolated = numamigrate_isolate_page(pgdat, page);
++	isolated = numamigrate_isolate_page(pgdat, page, memcg, node);
+ 	if (!isolated)
+ 		goto out;
+ 
+@@ -2620,14 +2732,23 @@ int migrate_misplaced_page(struct page *page, struct vm_area_struct *vma,
+ 	}
+ 	if (nr_succeeded) {
+ 		count_vm_numa_events(NUMA_PAGE_MIGRATE, nr_succeeded);
+-		if (!node_is_toptier(page_to_nid(page)) && node_is_toptier(node))
++		if (!node_is_toptier(page_to_nid(page)) &&
++		    node_is_toptier(node)) {
+ 			mod_node_page_state(pgdat, PGPROMOTE_SUCCESS,
+ 					    nr_succeeded);
++			if (memcg_nodectl_status(memcg))
++				atomic_long_add(nr_succeeded,
++						&memcg->promotion_counter);
++		}
+ 	}
+ 	BUG_ON(!list_empty(&migratepages));
++	if (memcg)
++		css_put(&memcg->css);
+ 	return isolated;
+ 
+ out:
++	if (memcg)
++		css_put(&memcg->css);
+ 	put_page(page);
+ 	return 0;
+ }
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 8e39705c7..c9788933b 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -7778,6 +7778,9 @@ static void __meminit pgdat_init_internals(struct pglist_data *pgdat)
+ 
+ 	pgdat_page_ext_init(pgdat);
+ 	lruvec_init(&pgdat->__lruvec);
++#ifdef CONFIG_MMCTL
++	pgdat->memcg_htmm_file = NULL;
++#endif
+ }
+ 
+ static void __meminit zone_init_internals(struct zone *zone, enum zone_type idx, int nid,
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 9c1c5e8b2..4cac50bda 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -67,107 +67,11 @@
+ 
+ #include "internal.h"
+ #include "swap.h"
++#include "vmscan.h"
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/vmscan.h>
+ 
+-struct scan_control {
+-	/* How many pages shrink_list() should reclaim */
+-	unsigned long nr_to_reclaim;
+-
+-	/*
+-	 * Nodemask of nodes allowed by the caller. If NULL, all nodes
+-	 * are scanned.
+-	 */
+-	nodemask_t	*nodemask;
+-
+-	/*
+-	 * The memory cgroup that hit its limit and as a result is the
+-	 * primary target of this reclaim invocation.
+-	 */
+-	struct mem_cgroup *target_mem_cgroup;
+-
+-	/*
+-	 * Scan pressure balancing between anon and file LRUs
+-	 */
+-	unsigned long	anon_cost;
+-	unsigned long	file_cost;
+-
+-	/* Can active folios be deactivated as part of reclaim? */
+-#define DEACTIVATE_ANON 1
+-#define DEACTIVATE_FILE 2
+-	unsigned int may_deactivate:2;
+-	unsigned int force_deactivate:1;
+-	unsigned int skipped_deactivate:1;
+-
+-	/* Writepage batching in laptop mode; RECLAIM_WRITE */
+-	unsigned int may_writepage:1;
+-
+-	/* Can mapped folios be reclaimed? */
+-	unsigned int may_unmap:1;
+-
+-	/* Can folios be swapped as part of reclaim? */
+-	unsigned int may_swap:1;
+-
+-	/* Proactive reclaim invoked by userspace through memory.reclaim */
+-	unsigned int proactive:1;
+-
+-	/*
+-	 * Cgroup memory below memory.low is protected as long as we
+-	 * don't threaten to OOM. If any cgroup is reclaimed at
+-	 * reduced force or passed over entirely due to its memory.low
+-	 * setting (memcg_low_skipped), and nothing is reclaimed as a
+-	 * result, then go back for one more cycle that reclaims the protected
+-	 * memory (memcg_low_reclaim) to avert OOM.
+-	 */
+-	unsigned int memcg_low_reclaim:1;
+-	unsigned int memcg_low_skipped:1;
+-
+-	unsigned int hibernation_mode:1;
+-
+-	/* One of the zones is ready for compaction */
+-	unsigned int compaction_ready:1;
+-
+-	/* There is easily reclaimable cold cache in the current node */
+-	unsigned int cache_trim_mode:1;
+-
+-	/* The file folios on the current node are dangerously low */
+-	unsigned int file_is_tiny:1;
+-
+-	/* Always discard instead of demoting to lower tier memory */
+-	unsigned int no_demotion:1;
+-
+-	/* Allocation order */
+-	s8 order;
+-
+-	/* Scan (total_size >> priority) pages at once */
+-	s8 priority;
+-
+-	/* The highest zone to isolate folios for reclaim from */
+-	s8 reclaim_idx;
+-
+-	/* This context's GFP mask */
+-	gfp_t gfp_mask;
+-
+-	/* Incremented by the number of inactive pages that were scanned */
+-	unsigned long nr_scanned;
+-
+-	/* Number of pages freed so far during a call to shrink_zones() */
+-	unsigned long nr_reclaimed;
+-
+-	struct {
+-		unsigned int dirty;
+-		unsigned int unqueued_dirty;
+-		unsigned int congested;
+-		unsigned int writeback;
+-		unsigned int immediate;
+-		unsigned int file_taken;
+-		unsigned int taken;
+-	} nr;
+-
+-	/* for recording the reclaimed slab by now */
+-	struct reclaim_state reclaim_state;
+-};
+ 
+ #ifdef ARCH_HAS_PREFETCHW
+ #define prefetchw_prev_lru_folio(_folio, _base, _field)			\
+@@ -188,7 +92,7 @@ struct scan_control {
+  */
+ int vm_swappiness = 60;
+ 
+-static void set_task_reclaim_state(struct task_struct *task,
++void set_task_reclaim_state(struct task_struct *task,
+ 				   struct reclaim_state *rs)
+ {
+ 	/* Check for an overwrite */
+@@ -314,7 +218,7 @@ static int expand_shrinker_info(int new_id)
+ 	int new_nr_max = new_id + 1;
+ 	int map_size, defer_size = 0;
+ 	int old_map_size, old_defer_size = 0;
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 
+ 	if (!need_expand(new_nr_max))
+ 		goto out;
+@@ -546,8 +450,18 @@ static long add_nr_deferred(long nr, struct shrinker *shrinker,
+ 
+ static bool can_demote(int nid, struct scan_control *sc)
+ {
++	struct mem_cgroup *memcg = NULL;
++
++	if (sc)
++		memcg = sc->target_mem_cgroup;
++
++	if (memcg && memcg_can_demote(memcg))
++		goto mmctl_isolate_ctl;
++
+ 	if (!numa_demotion_enabled)
+ 		return false;
++
++mmctl_isolate_ctl:
+ 	if (sc && sc->no_demotion)
+ 		return false;
+ 	if (next_demotion_node(nid) == NUMA_NO_NODE)
+@@ -605,7 +519,7 @@ unsigned long zone_reclaimable_pages(struct zone *zone)
+  * @lru: lru to use
+  * @zone_idx: zones to consider (use MAX_NR_ZONES - 1 for the whole LRU list)
+  */
+-static unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru,
++unsigned long lruvec_lru_size(struct lruvec *lruvec, enum lru_list lru,
+ 				     int zone_idx)
+ {
+ 	unsigned long size = 0;
+@@ -1604,6 +1518,7 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
+ 	int target_nid = next_demotion_node(pgdat->node_id);
+ 	unsigned int nr_succeeded;
+ 	nodemask_t allowed_mask;
++	struct mem_cgroup *demote_memcg;
+ 
+ 	struct migration_target_control mtc = {
+ 		/*
+@@ -1625,12 +1540,26 @@ static unsigned int demote_folio_list(struct list_head *demote_folios,
+ 
+ 	node_get_allowed_targets(pgdat, &allowed_mask);
+ 
++	/*
++	 * Capture the source memcg for per-cgroup PGDEMOTE accounting before
++	 * migrate_pages() moves the succeeded folios off @demote_folios. Reclaim
++	 * isolates from a single lruvec, so every folio here shares one memcg, and
++	 * demotion keeps the page's memcg charge (only the node changes), so the
++	 * pointer stays valid across the migration.
++	 */
++	demote_memcg = folio_memcg(list_first_entry(demote_folios,
++						    struct folio, lru));
++
+ 	/* Demotion ignores all cpuset and mempolicy settings */
+ 	migrate_pages(demote_folios, alloc_demote_page, NULL,
+ 		      (unsigned long)&mtc, MIGRATE_ASYNC, MR_DEMOTION,
+ 		      &nr_succeeded);
+ 
+ 	__count_vm_events(PGDEMOTE_KSWAPD + reclaimer_offset(), nr_succeeded);
++	if (demote_memcg)
++		__count_memcg_events(demote_memcg,
++				     PGDEMOTE_KSWAPD + reclaimer_offset(),
++				     nr_succeeded);
+ 
+ 	return nr_succeeded;
+ }
+@@ -2607,7 +2536,7 @@ static unsigned long shrink_inactive_list(unsigned long nr_to_scan,
+  * The downside is that we have to touch folio->_refcount against each folio.
+  * But we had to alter folio->flags anyway.
+  */
+-static void shrink_active_list(unsigned long nr_to_scan,
++void shrink_active_list(unsigned long nr_to_scan,
+ 			       struct lruvec *lruvec,
+ 			       struct scan_control *sc,
+ 			       enum lru_list lru)
+@@ -3145,7 +3074,7 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
+  * Anonymous LRU management is a waste if there is
+  * ultimately no way to reclaim the memory.
+  */
+-static bool can_age_anon_pages(struct pglist_data *pgdat,
++bool can_age_anon_pages(struct pglist_data *pgdat,
+ 			       struct scan_control *sc)
+ {
+ 	/* Aging the anon LRU is valuable if swap is present: */
+@@ -3421,7 +3350,7 @@ void lru_gen_del_mm(struct mm_struct *mm)
+ #ifdef CONFIG_MEMCG
+ void lru_gen_migrate_mm(struct mm_struct *mm)
+ {
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 	struct task_struct *task = rcu_dereference_protected(mm->owner, true);
+ 
+ 	VM_WARN_ON_ONCE(task->mm != mm);
+@@ -4540,7 +4469,7 @@ static unsigned long lru_gen_min_ttl __read_mostly;
+ 
+ static void lru_gen_age_node(struct pglist_data *pgdat, struct scan_control *sc)
+ {
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 	unsigned long min_ttl = READ_ONCE(lru_gen_min_ttl);
+ 
+ 	VM_WARN_ON_ONCE(!current_is_kswapd());
+@@ -5362,7 +5291,7 @@ static void shrink_many(struct pglist_data *pgdat, struct scan_control *sc)
+ 	int first_bin;
+ 	struct lruvec *lruvec;
+ 	struct lru_gen_folio *lrugen;
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 	const struct hlist_nulls_node *pos;
+ 	unsigned long nr_to_reclaim = get_nr_to_reclaim(sc);
+ 
+@@ -5612,7 +5541,7 @@ static void lru_gen_change_state(bool enabled)
+ {
+ 	static DEFINE_MUTEX(state_mutex);
+ 
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 
+ 	cgroup_lock();
+ 	cpus_read_lock();
+@@ -5751,7 +5680,7 @@ static struct attribute_group lru_gen_attr_group = {
+ 
+ static void *lru_gen_seq_start(struct seq_file *m, loff_t *pos)
+ {
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 	loff_t nr_to_skip = *pos;
+ 
+ 	m->private = kvmalloc(PATH_MAX, GFP_KERNEL);
+@@ -6393,7 +6322,7 @@ static inline bool should_continue_reclaim(struct pglist_data *pgdat,
+ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
+ {
+ 	struct mem_cgroup *target_memcg = sc->target_mem_cgroup;
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 
+ 	memcg = mem_cgroup_iter(target_memcg, NULL, NULL);
+ 	do {
+@@ -6448,7 +6377,7 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
+ 	} while ((memcg = mem_cgroup_iter(target_memcg, memcg, NULL)));
+ }
+ 
+-static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
++void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
+ {
+ 	struct reclaim_state *reclaim_state = current->reclaim_state;
+ 	unsigned long nr_reclaimed, nr_scanned;
+@@ -6721,7 +6650,7 @@ static void shrink_zones(struct zonelist *zonelist, struct scan_control *sc)
+ 	sc->gfp_mask = orig_mask;
+ }
+ 
+-static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
++void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
+ {
+ 	struct lruvec *target_lruvec;
+ 	unsigned long refaults;
+@@ -7097,7 +7026,7 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
+ 
+ static void kswapd_age_node(struct pglist_data *pgdat, struct scan_control *sc)
+ {
+-	struct mem_cgroup *memcg;
++	struct mem_cgroup *memcg = NULL;
+ 	struct lruvec *lruvec;
+ 
+ 	if (lru_gen_enabled()) {
+@@ -7294,14 +7223,12 @@ update_reclaim_active(pg_data_t *pgdat, int highest_zoneidx, bool active)
+ 	}
+ }
+ 
+-static inline void
+-set_reclaim_active(pg_data_t *pgdat, int highest_zoneidx)
++void set_reclaim_active(pg_data_t *pgdat, int highest_zoneidx)
+ {
+ 	update_reclaim_active(pgdat, highest_zoneidx, true);
+ }
+ 
+-static inline void
+-clear_reclaim_active(pg_data_t *pgdat, int highest_zoneidx)
++void clear_reclaim_active(pg_data_t *pgdat, int highest_zoneidx)
+ {
+ 	update_reclaim_active(pgdat, highest_zoneidx, false);
+ }
+diff --git a/mm/vmscan.h b/mm/vmscan.h
+new file mode 100644
+index 000000000..ad3d83391
+--- /dev/null
++++ b/mm/vmscan.h
+@@ -0,0 +1,116 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _MM_VMSCAN_H
++#define _MM_VMSCAN_H
++
++#include <linux/mmzone.h>
++#include <linux/sched.h>
++#include <linux/swap.h>
++
++struct scan_control {
++	/* How many pages shrink_list() should reclaim */
++	unsigned long nr_to_reclaim;
++
++	/*
++	 * Nodemask of nodes allowed by the caller. If NULL, all nodes
++	 * are scanned.
++	 */
++	nodemask_t	*nodemask;
++
++	/*
++	 * The memory cgroup that hit its limit and as a result is the
++	 * primary target of this reclaim invocation.
++	 */
++	struct mem_cgroup *target_mem_cgroup;
++
++	/*
++	 * Scan pressure balancing between anon and file LRUs
++	 */
++	unsigned long	anon_cost;
++	unsigned long	file_cost;
++
++	/* Can active folios be deactivated as part of reclaim? */
++#define DEACTIVATE_ANON 1
++#define DEACTIVATE_FILE 2
++	unsigned int may_deactivate:2;
++	unsigned int force_deactivate:1;
++	unsigned int skipped_deactivate:1;
++
++	/* Writepage batching in laptop mode; RECLAIM_WRITE */
++	unsigned int may_writepage:1;
++
++	/* Can mapped folios be reclaimed? */
++	unsigned int may_unmap:1;
++
++	/* Can folios be swapped as part of reclaim? */
++	unsigned int may_swap:1;
++
++	/* Proactive reclaim invoked by userspace through memory.reclaim */
++	unsigned int proactive:1;
++
++	/*
++	 * Cgroup memory below memory.low is protected as long as we
++	 * don't threaten to OOM. If any cgroup is reclaimed at
++	 * reduced force or passed over entirely due to its memory.low
++	 * setting (memcg_low_skipped), and nothing is reclaimed as a
++	 * result, then go back for one more cycle that reclaims the protected
++	 * memory (memcg_low_reclaim) to avert OOM.
++	 */
++	unsigned int memcg_low_reclaim:1;
++	unsigned int memcg_low_skipped:1;
++
++	unsigned int hibernation_mode:1;
++
++	/* One of the zones is ready for compaction */
++	unsigned int compaction_ready:1;
++
++	/* There is easily reclaimable cold cache in the current node */
++	unsigned int cache_trim_mode:1;
++
++	/* The file folios on the current node are dangerously low */
++	unsigned int file_is_tiny:1;
++
++	/* Always discard instead of demoting to lower tier memory */
++	unsigned int no_demotion:1;
++
++	/* Allocation order */
++	s8 order;
++
++	/* Scan (total_size >> priority) pages at once */
++	s8 priority;
++
++	/* The highest zone to isolate folios for reclaim from */
++	s8 reclaim_idx;
++
++	/* This context's GFP mask */
++	gfp_t gfp_mask;
++
++	/* Incremented by the number of inactive pages that were scanned */
++	unsigned long nr_scanned;
++
++	/* Number of pages freed so far during a call to shrink_zones() */
++	unsigned long nr_reclaimed;
++
++	struct {
++		unsigned int dirty;
++		unsigned int unqueued_dirty;
++		unsigned int congested;
++		unsigned int writeback;
++		unsigned int immediate;
++		unsigned int file_taken;
++		unsigned int taken;
++	} nr;
++
++	/* for recording the reclaimed slab by now */
++	struct reclaim_state reclaim_state;
++};
++
++void shrink_node(pg_data_t *pgdat, struct scan_control *sc);
++bool can_age_anon_pages(struct pglist_data *pgdat, struct scan_control *sc);
++void shrink_active_list(unsigned long nr_to_scan, struct lruvec *lruvec,
++			struct scan_control *sc, enum lru_list lru);
++void set_task_reclaim_state(struct task_struct *task, struct reclaim_state *rs);
++void set_reclaim_active(pg_data_t *pgdat, int highest_zoneidx);
++void clear_reclaim_active(pg_data_t *pgdat, int highest_zoneidx);
++void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat);
++
++#endif /* _MM_VMSCAN_H */

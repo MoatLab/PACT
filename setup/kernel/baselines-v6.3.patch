@@ -1,0 +1,377 @@
+diff --git a/include/linux/memory-tiers.h b/include/linux/memory-tiers.h
+index fc9647b1b..c903b1d6f 100644
+--- a/include/linux/memory-tiers.h
++++ b/include/linux/memory-tiers.h
+@@ -36,6 +36,9 @@ struct memory_dev_type *alloc_memory_type(int adistance);
+ void destroy_memory_type(struct memory_dev_type *memtype);
+ void init_node_memory_type(int node, struct memory_dev_type *default_type);
+ void clear_node_memory_type(int node, struct memory_dev_type *memtype);
++void colloid_init_memory_tier(int node);
++void colloid_clear_memory_tier(int node);
++struct memory_dev_type *colloid_get_default_dram_memtype(void);
+ #ifdef CONFIG_MIGRATION
+ int next_demotion_node(int node);
+ void node_get_allowed_targets(pg_data_t *pgdat, nodemask_t *targets);
+diff --git a/include/linux/sched/numa_balancing.h b/include/linux/sched/numa_balancing.h
+index 3988762ef..ae085ae29 100644
+--- a/include/linux/sched/numa_balancing.h
++++ b/include/linux/sched/numa_balancing.h
+@@ -22,6 +22,7 @@ extern void set_numabalancing_state(bool enabled);
+ extern void task_numa_free(struct task_struct *p, bool final);
+ extern bool should_numa_migrate_memory(struct task_struct *p, struct page *page,
+ 					int src_nid, int dst_cpu);
++extern int numa_migrate_memory_away_target(struct page *page, int src_nid);
+ #else
+ static inline void task_numa_fault(int last_node, int node, int pages,
+ 				   int flags)
+@@ -42,6 +43,10 @@ static inline bool should_numa_migrate_memory(struct task_struct *p,
+ {
+ 	return true;
+ }
++static inline int numa_migrate_memory_away_target(struct page *page, int src_nid)
++{
++	return NUMA_NO_NODE;
++}
+ #endif
+ 
+ #endif /* _LINUX_SCHED_NUMA_BALANCING_H */
+diff --git a/include/linux/sched/sysctl.h b/include/linux/sched/sysctl.h
+index 5a64582b0..bb070df05 100644
+--- a/include/linux/sched/sysctl.h
++++ b/include/linux/sched/sysctl.h
+@@ -22,6 +22,7 @@ enum sched_tunable_scaling {
+ #define NUMA_BALANCING_DISABLED		0x0
+ #define NUMA_BALANCING_NORMAL		0x1
+ #define NUMA_BALANCING_MEMORY_TIERING	0x2
++#define NUMA_BALANCING_COLLOID		0x4
+ 
+ #ifdef CONFIG_NUMA_BALANCING
+ extern int sysctl_numa_balancing_mode;
+diff --git a/kernel/sched/core.c b/kernel/sched/core.c
+index 0d18c3969..d1c4e8a98 100644
+--- a/kernel/sched/core.c
++++ b/kernel/sched/core.c
+@@ -4640,7 +4640,7 @@ static struct ctl_table sched_core_sysctls[] = {
+ 		.mode		= 0644,
+ 		.proc_handler	= sysctl_numa_balancing,
+ 		.extra1		= SYSCTL_ZERO,
+-		.extra2		= SYSCTL_FOUR,
++		.extra2		= SYSCTL_ONE_HUNDRED,
+ 	},
+ #endif /* CONFIG_NUMA_BALANCING */
+ 	{}
+diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
+index 92a16a250..98135857a 100644
+--- a/kernel/sched/fair.c
++++ b/kernel/sched/fair.c
+@@ -26,6 +26,7 @@
+ #include <linux/jiffies.h>
+ #include <linux/mm_api.h>
+ #include <linux/highmem.h>
++#include <linux/swap.h>
+ #include <linux/spinlock_api.h>
+ #include <linux/cpumask_api.h>
+ #include <linux/lockdep_api.h>
+@@ -58,6 +59,9 @@
+ 
+ #include <linux/memcontrol.h>
+ 
++extern int colloid_local_lat_gt_remote;
++extern int colloid_nid_of_interest;
++
+ /*
+  * Targeted preemption latency for CPU-bound tasks:
+  *
+@@ -1688,6 +1692,15 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 			/* workload changed, reset hot threshold */
+ 			pr_debug("mmctl: free space enough, allowing migration\n");
+ 			mig->nbp_threshold = 0;
++			/*
++			 * colloid: no promotion into the node of interest while its
++			 * latency is above the remote latency, as without a limit.
++			 */
++			if (sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++			    colloid_nid_of_interest == dst_nid &&
++			    READ_ONCE(colloid_local_lat_gt_remote)) {
++				ret = false; goto out;
++			}
+ 			ret = true; goto out;
+ 		}
+ 		pr_debug("mmctl: free space NOT enough, checking threshold\n");
+@@ -1705,6 +1718,13 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 			ret = false; goto out;
+ 		}
+ 
++		/* colloid: the same veto as without a limit, before the rate limit. */
++		if (sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++		    colloid_nid_of_interest == dst_nid &&
++		    READ_ONCE(colloid_local_lat_gt_remote)) {
++			ret = false; goto out;
++		}
++
+ 		pr_debug("mmctl: checking rate limit\n");
+ 		ret = !numa_cgroup_promotion_rate_limit(pn, rate_limit,
+ 						  thp_nr_pages(page));
+@@ -1722,12 +1742,21 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 		unsigned long rate_limit;
+ 		unsigned int latency, th, def_th;
+ 
++		/* colloid: if dst is not top tier, skip (CPU on slow NUMA accessing own page) */
++		if (!node_is_toptier(dst_nid)) {
++			ret = false; goto out;
++		}
++
+ 		pgdat = NODE_DATA(dst_nid);
+ 		if (pgdat_free_space_enough(pgdat)) {
+ 			/* workload changed, reset hot threshold */
+ 			pgdat->nbp_threshold = 0;
+-			ret = true;
+-			goto out;
++			if (sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++			    colloid_nid_of_interest == dst_nid &&
++			    READ_ONCE(colloid_local_lat_gt_remote)) {
++				ret = false; goto out;
++			}
++			ret = true; goto out;
+ 		}
+ 
+ 		def_th = sysctl_numa_balancing_hot_threshold;
+@@ -1742,11 +1771,22 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 			goto out;
+ 		}
+ 
++		if (sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++		    colloid_nid_of_interest == dst_nid &&
++		    READ_ONCE(colloid_local_lat_gt_remote)) {
++			ret = false; goto out;
++		}
++
+ 		ret = !numa_promotion_rate_limit(pgdat, rate_limit,
+ 						  thp_nr_pages(page));
+ 		goto out;
+ 	}
+ 
++	/* colloid: if normal NUMA balancing is off, don't proceed to cpupid logic */
++	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL)) {
++		ret = false; goto out;
++	}
++
+ 	this_cpupid = cpu_pid_to_cpupid(dst_cpu, current->pid);
+ 	last_cpupid = page_cpupid_xchg_last(page, this_cpupid);
+ 
+@@ -1831,6 +1871,43 @@ bool should_numa_migrate_memory(struct task_struct *p, struct page * page,
+ 	return ret;
+ }
+ 
++/*
++ * colloid: Should we migrate page away from local NUMA node due to congestion?
++ * Returns destination nid, or NUMA_NO_NODE if no migration needed.
++ */
++int numa_migrate_memory_away_target(struct page *page, int src_nid)
++{
++	unsigned int latency, th;
++
++	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING &&
++	      sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID))
++		return NUMA_NO_NODE;
++
++	if (src_nid != colloid_nid_of_interest)
++		return NUMA_NO_NODE;
++
++	if (!READ_ONCE(colloid_local_lat_gt_remote))
++		return NUMA_NO_NODE;
++
++	/* Local memory is congested */
++	if (sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL) {
++		/* No timestamp, use active/inactive list to determine hotness */
++		if (!PageActive(page)) {
++			mark_page_accessed(page);
++			return NUMA_NO_NODE;
++		}
++	} else {
++		/* Timestamp in page flags, use hint fault latency */
++		th = NODE_DATA(src_nid)->nbp_threshold ? :
++			sysctl_numa_balancing_hot_threshold;
++		latency = numa_hint_fault_latency(page);
++		if (latency >= th)
++			return NUMA_NO_NODE;
++	}
++
++	return next_demotion_node(src_nid);
++}
++
+ /*
+  * 'numa_type' describes the node at the moment of load balancing.
+  */
+@@ -3020,6 +3097,10 @@ void task_numa_fault(int last_cpupid, int mem_node, int pages, int flags)
+ 	     !cpupid_valid(last_cpupid)))
+ 		return;
+ 
++	/* colloid: NUMA fault stats not needed when normal balancing is off */
++	if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL))
++		return;
++
+ 	/* Allocate buffer to track faults on a per-node basis */
+ 	if (unlikely(!p->numa_faults)) {
+ 		int size = sizeof(*p->numa_faults) *
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 3fae2d249..89e9c48ec 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -1545,6 +1545,9 @@ vm_fault_t do_huge_pmd_numa_page(struct vm_fault *vmf)
+ 		last_cpupid = page_cpupid_last(page);
+ 	target_nid = numa_migrate_prep(page, vma, haddr, page_nid,
+ 				       &flags);
++	/* colloid: move pages away from local NUMA if congested */
++	if (page_nid == numa_node_id() && target_nid == NUMA_NO_NODE)
++		target_nid = numa_migrate_memory_away_target(page, page_nid);
+ 
+ 	if (target_nid == NUMA_NO_NODE) {
+ 		put_page(page);
+@@ -1890,11 +1893,14 @@ int change_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
+ 		 * balancing is disabled
+ 		 */
+ 		if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL) &&
++		    !(sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++		      sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+ 		    toptier)
+ 			goto unlock;
+ 
+ 		if (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING &&
+-		    !toptier)
++		    (!toptier || (sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++		                  !(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL))))
+ 			xchg_page_access_time(page, jiffies_to_msecs(jiffies));
+ 	}
+ 	/*
+diff --git a/mm/memory-tiers.c b/mm/memory-tiers.c
+index e593e56e5..d8415609d 100644
+--- a/mm/memory-tiers.c
++++ b/mm/memory-tiers.c
+@@ -105,6 +105,11 @@ static int top_tier_adistance;
+ static struct demotion_nodes *node_demotion __read_mostly;
+ #endif /* CONFIG_MIGRATION */
+ 
++int colloid_local_lat_gt_remote = 0;
++EXPORT_SYMBOL(colloid_local_lat_gt_remote);
++int colloid_nid_of_interest = NUMA_NO_NODE;
++EXPORT_SYMBOL(colloid_nid_of_interest);
++
+ static inline struct memory_tier *to_memory_tier(struct device *device)
+ {
+ 	return container_of(device, struct memory_tier, dev);
+@@ -263,6 +268,7 @@ bool node_is_toptier(int node)
+ 	rcu_read_unlock();
+ 	return toptier;
+ }
++EXPORT_SYMBOL_GPL(node_is_toptier);
+ 
+ void node_get_allowed_targets(pg_data_t *pgdat, nodemask_t *targets)
+ {
+@@ -326,6 +332,7 @@ int next_demotion_node(int node)
+ 
+ 	return target;
+ }
++EXPORT_SYMBOL_GPL(next_demotion_node);
+ 
+ static void disable_all_demotion_targets(void)
+ {
+@@ -418,6 +425,10 @@ static void establish_demotion_targets(void)
+ 	 * Once we detect such a memory tier, we consider that tier
+ 	 * as top tiper from which promotion is not allowed.
+ 	 */
++	#ifdef CONFIG_MMCTL
++	top_tier_adistance = round_down(default_dram_type->adistance, MEMTIER_CHUNK_SIZE) + MEMTIER_CHUNK_SIZE - 1;
++	pr_info("colloid: top_tier_adistance set to %d", top_tier_adistance);
++	#else
+ 	list_for_each_entry_reverse(memtier, &memory_tiers, list) {
+ 		tier_nodes = get_memtier_nodemask(memtier);
+ 		nodes_and(tier_nodes, node_states[N_CPU], tier_nodes);
+@@ -427,10 +438,11 @@ static void establish_demotion_targets(void)
+ 			 * is considered toptier.
+ 			 */
+ 			top_tier_adistance = memtier->adistance_start +
+-						MEMTIER_CHUNK_SIZE - 1;
++					MEMTIER_CHUNK_SIZE - 1;
+ 			break;
+ 		}
+ 	}
++	#endif
+ 	/*
+ 	 * Now build the lower_tier mask for each node collecting node mask from
+ 	 * all memory tier below it. This allows us to fallback demotion page
+@@ -625,6 +637,41 @@ static int __meminit memtier_hotplug_callback(struct notifier_block *self,
+ 	return notifier_from_errno(0);
+ }
+ 
++struct memory_dev_type *colloid_get_default_dram_memtype() {
++	return default_dram_type;
++}
++EXPORT_SYMBOL_GPL(colloid_get_default_dram_memtype);
++
++void colloid_init_memory_tier(int node) {
++	struct memory_tier *memtier;
++
++	if (node_state(node, N_CPU)) {
++		pr_info("colloid: NUMA node is NOT zero CPU");
++	} else {
++		pr_info("colloid: NUMA node is zero CPU");
++	}
++
++	mutex_lock(&memory_tier_lock);
++	memtier = set_node_memory_tier(node);
++	if (!IS_ERR(memtier)) {
++		pr_info("set_node_memory_tier success");
++		establish_demotion_targets();
++		pr_info("established demotion targets");
++	}
++	mutex_unlock(&memory_tier_lock);
++}
++EXPORT_SYMBOL_GPL(colloid_init_memory_tier);
++
++void colloid_clear_memory_tier(int node) {
++	mutex_lock(&memory_tier_lock);
++	clear_node_memory_tier(node);
++	pr_info("clear_node_memory_tier");
++	establish_demotion_targets();
++	pr_info("established demotion targets");
++	mutex_unlock(&memory_tier_lock);
++}
++EXPORT_SYMBOL_GPL(colloid_clear_memory_tier);
++
+ static int __init memory_tier_init(void)
+ {
+ 	int ret, node;
+diff --git a/mm/memory.c b/mm/memory.c
+index 01a23ad48..219811360 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -4734,6 +4734,9 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
+ 		last_cpupid = page_cpupid_last(page);
+ 	target_nid = numa_migrate_prep(page, vma, vmf->address, page_nid,
+ 			&flags);
++	/* colloid: move pages away from local NUMA if congested */
++	if (page_nid == numa_node_id() && target_nid == NUMA_NO_NODE)
++		target_nid = numa_migrate_memory_away_target(page, page_nid);
+ 	if (target_nid == NUMA_NO_NODE) {
+ 		put_page(page);
+ 		goto out_map;
+diff --git a/mm/mprotect.c b/mm/mprotect.c
+index 36351a00c..a7fee8258 100644
+--- a/mm/mprotect.c
++++ b/mm/mprotect.c
+@@ -166,10 +166,13 @@ static long change_pte_range(struct mmu_gather *tlb,
+ 				 * balancing is disabled
+ 				 */
+ 				if (!(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL) &&
++				    !(sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++				      sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING) &&
+ 				    toptier)
+ 					continue;
+ 				if (sysctl_numa_balancing_mode & NUMA_BALANCING_MEMORY_TIERING &&
+-				    !toptier)
++				    (!toptier || (sysctl_numa_balancing_mode & NUMA_BALANCING_COLLOID &&
++				                  !(sysctl_numa_balancing_mode & NUMA_BALANCING_NORMAL))))
+ 					xchg_page_access_time(page,
+ 						jiffies_to_msecs(jiffies));
+ 			}

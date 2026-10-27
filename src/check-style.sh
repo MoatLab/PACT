@@ -1,15 +1,15 @@
 #!/bin/bash
-# check-style.sh — lightweight style check for PACT C sources.
+# check-style.sh: lightweight style check for PACT C sources.
 #
-# Project style (QEMU-derived): braces around every if/else/for/while body
-# EXCEPT short single-statement guard clauses with an immediate return,
-# break, continue, or goto.
+# Project style: braces around every if/else/for/while body, guard clauses
+# included. `make check-format` (clang-format InsertBraces) enforces it.
+# This grep gate is coarser: it allows same-line guard bodies.
 #
 # What this script flags:
 #   1. `if (cond) stmt;`           where stmt is NOT one of:
-#                                    return [val];  break;  continue;  goto X;
-#   2. `else stmt;`                — always (no guard exception on else)
-#   3. `} else stmt;`              — same as above
+#                                    return [val];  break;  continue;  goto X;  exit(...);
+#   2. `else stmt;`                where stmt is NOT return, break, continue or goto
+#   3. `} else stmt;`              - same as above
 #
 # What this script does NOT yet flag (clang-format does, see `make format`):
 #   - next-line braceless bodies (`if (...)\n    stmt;`)
@@ -47,7 +47,7 @@ while IFS=: read -r file line text; do
     body=$(printf '%s\n' "$text" | sed -E 's/.*if \([^)]*\)[[:space:]]+//')
     case "$body" in
         return\ *|return\;*|break\;*|continue\;*|goto\ *|exit\(*)
-            continue ;;  # guard clause — allowed
+            continue ;;  # guard clause: allowed
     esac
     printf "${RED}%s:%s:${RST} same-line non-guard if-body: %s\n" \
         "$file" "$line" "$text" >&2
@@ -57,7 +57,8 @@ done < <(grep -nE '^\s*[}]?[[:space:]]*if \([^)]*\)[[:space:]]+[a-zA-Z_]' \
          | grep -vE 'if \([^)]*\)[[:space:]]+\{' \
          | grep -vE '^\s*\*')
 
-# 2. Same-line else-body (never a guard — guards are at start of function).
+# 2. Same-line else-body. A guard body (return, break, continue, goto) is
+#    allowed.
 while IFS=: read -r file line text; do
     case "$file" in *khashl.h|*minicoro.h) continue ;; esac
     case "$text" in
@@ -76,7 +77,7 @@ done < <(grep -nE '(^\s*else|\}[[:space:]]*else)[[:space:]]+[a-zA-Z_]' \
          "$SRC"/*.c "$SRC"/*.h 2>/dev/null)
 
 if (( violations == 0 )); then
-    echo "check-style: PASS — no same-line brace violations found."
+    echo "check-style: PASS - no same-line brace violations found."
     echo
     echo "Note: this is a coarse grep-based check. For full coverage run:"
     echo "    make check-format    # requires clang-format >= 16"

@@ -154,4 +154,4 @@
         return (head - tail) & rb->mask;                                                             \
     }
 
-#endif // RING_BUFFER_H
+#endif /* RING_BUFFER_H */

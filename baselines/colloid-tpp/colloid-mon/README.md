@@ -1,9 +1,9 @@
 # colloid-mon
 
-Colloid monitoring daemon for the Colloid-tpp baseline. Build it against the
-patched v6.3 kernel tree (see [`../README.md`](../README.md), "Build the helper
-tools"):
+Colloid monitoring kernel module for the Colloid-tpp baseline.
+Build it after the kernel that it serves has booted. The Makefile uses
+`/lib/modules/$(uname -r)/build`.
 
 ```bash
-make        # -> colloid-mon
+make        # -> colloid-mon.ko
 ```

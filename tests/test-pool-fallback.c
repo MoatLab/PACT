@@ -21,25 +21,28 @@ int main(void)
     set_log_level(LOG_LEVEL_ERROR);
     for (unsigned fallback = 0; fallback < 2; fallback++) {
         for (size_t cap = 0; cap <= 2; cap++) {
-            pact_workload_t workload = {0};
-            workload.pac_table = pac_table_init();
-            assert(workload.pac_table);
-            pact_context_t ctx = {.workload = &workload, .max_pac_entries = cap};
+            pact_workload_t workload = {.target_pid = 123};
+            pac_domain_t domain = {0};
+            domain.table = pac_table_init();
+            assert(domain.table);
+            pact_context_t ctx = {
+                .workloads = &workload, .nr_workloads = 1, .max_pac_entries = cap};
             fail_pool = fallback;
             init_pac_metadata_pool(&ctx);
             assert((ctx.pac_metadata_pool == NULL) == fallback);
             for (size_t i = 1; i <= 3; i++) {
-                pac_metadata_t *meta = create_pac_entry(&ctx, workload.pac_table, i * 4096, 1, 123);
+                pac_metadata_t *meta = create_pac_entry(&ctx, &domain, &workload, i * 4096, 1);
                 assert((meta != NULL) == (cap == 0 || i <= cap));
             }
-            assert(kh_size(workload.pac_table) == (cap ? cap : 3));
-            assert(workload.stats.pool_alloc_skipped == (cap ? 3 - cap : 0));
-            for (khint_t i = 0; i != kh_end(workload.pac_table); i++) {
-                if (kh_exist(workload.pac_table, i)) {
-                    free_pac_metadata(&ctx, kh_val(workload.pac_table, i));
+            assert(kh_size(domain.table) == (cap ? cap : 3));
+            assert(ctx.stats.pool_alloc_skipped == (cap ? 3 - cap : 0));
+            for (khint_t i = 0; i != kh_end(domain.table); i++) {
+                if (kh_exist(domain.table, i)) {
+                    free_pac_metadata(&ctx, &domain, kh_val(domain.table, i));
                 }
             }
-            pac_table_destroy(workload.pac_table);
+            assert(domain.nr_metadata == 0);
+            pac_table_destroy(domain.table);
             if (ctx.pac_metadata_pool) {
                 assert(pool_available(ctx.pac_metadata_pool) ==
                        get_total_capacity(ctx.pac_metadata_pool));
@@ -47,5 +50,5 @@ int main(void)
             }
         }
     }
-    puts("PASS: pooled and heap fallback honor zero, one and two entry limits");
+    puts("PASS: pool-backed and heap fallback honor zero, one and two entry limits");
 }

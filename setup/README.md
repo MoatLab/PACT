@@ -1,111 +1,98 @@
 # Host setup
 
-Bring a fresh machine to a state where PACT can run. Do this **before**
-building `../src/` or using `../run/`.
+Bring a fresh machine to a state where PACT can run, in PACT mode or in Tierce
+mode. Do this **before** building `../src/` or using `../run/`.
 
 | Subdir | Purpose |
 |--------|---------|
-| [`kernel/`](kernel/) | Build, install, and boot vanilla **Linux 6.3**, then build and load the two modules the tiering subsystem requires - `tierinit` (registers the slow tier + demotion targets) and `kswapdrst` (keeps `kswapd`/demotion from stalling). |
-| [`env/`](env/) | Prepare the machine for controlled runs: uncore-frequency pinning, CXL/NUMA layout, performance governor, and disabling turbo / THP / KSM / NUMA-balancing. |
+| [`kernel/`](kernel/) | Build and install the patched **Linux 6.3** kernel (`6.3.0-tierce`) that both modes use: a per-cgroup fast-tier cap and per-cgroup demotion (`kdemotiond`). Build and load the two modules that the tiering subsystem needs: `tierinit` (registers the slow tier and the demotion targets) and `kswapdrst` (keeps `kswapd` and demotion from stalling). |
+| [`env/`](env/) | Prepare the machine for controlled runs: uncore-frequency pinning, node-1 CPUs offline, performance governor, `perf_event_paranoid` -1, page cache dropped, and NMI watchdog / ASLR / KSM / NUMA balancing / THP / SMT / turbo / swap off. |
+| [`tools/`](tools/) | Offline scripts that measure the CHA TID filter value of each core (Tierce mode, only for a CPU that the runtime does not know). |
 
 ## Order
 
-1. **Kernel** - [`kernel/`](kernel/): `setup_kernel.sh` → reboot into 6.3.
-2. **Fast-tier size** - shrink node 0 with a `memmap=` boot parameter → reboot
-   again (see [Set the local fast-tier DRAM size](#set-the-local-fast-tier-dram-size)
-   below). **This is what creates the fast/slow capacity split; without it the
-   whole workload fits in local DRAM and PACT has nothing to migrate.**
-3. **Modules** - [`kernel/`](kernel/): `build_modules.sh`, then load
-   `tierinit.ko` + `kswapdrst.ko` (or let `run-pact.sh` load them).
-4. **Environment** - [`env/`](env/): `sudo ./prepare_environment.sh` (or let
-   the runner do it via `run_setup_config=true ./run-pact.sh ...`).
+1. **Kernel** - [`kernel/`](kernel/): `./setup_kernel.sh` builds the
+   `linux-image` and `linux-headers` packages of `6.3.0-tierce`. Install
+   both with `dpkg -i`.
+2. **GRUB** - make `6.3.0-tierce` the default kernel and add three boot
+   arguments to `GRUB_CMDLINE_LINUX` in `/etc/default/grub`, then run
+   `sudo update-grub` and reboot (details in
+   [`kernel/README.md`](kernel/README.md#grub)):
 
-> **Re-run `prepare_environment.sh` after EVERY reboot.** Its effects (node-1
-> CPUs offline, uncore frequency, THP/KSM/NUMA-balancing off) are runtime-only
-> and do NOT persist across a reboot. In particular, after the `memmap` reboot
-> in step 2 you must run it again before measuring, or the slow tier still has
-> online CPUs and the run is invalid. The modules (step 3) also need reloading
-> after a reboot; `run-pact.sh` reloads them automatically.
-
-The env scripts source each other by their own location, so they can be
-invoked from anywhere (e.g. the runner calls
-`../setup/env/prepare_environment.sh`).
-
-## Validate the CXL emulation (important)
-
-The slow tier is emulated by a remote NUMA node with its CPUs taken offline
-and its uncore frequency pinned low. `check_cxl_conf` now **aborts** if Node 1
-still has online CPUs (an unvalidated layout silently produces invalid
-results). Two things are *not* auto-validated and you should confirm them:
-
-1. **Topology** - after `prepare_environment.sh`, the slow-tier node must be
-   CPU-less:
-
-   ```bash
-   numactl --hardware        # 'node 1 cpus:' should be empty
+   ```
+   rdt=cmt,mbmtotal,mbmlocal,l3cat systemd.unified_cgroup_hierarchy=yes mitigations=off
    ```
 
-2. **Latency** - the emulated tiers should land near the paper's targets
-   (~90 ns local DRAM, ~140 ns remote NUMA, ~190 ns CXL-emulated; see
-   [`../modeling/README.md`](../modeling/README.md)). Measure with a
-   pointer-chase latency tool (e.g. Intel MLC `--latency_matrix`, or the
-   `ptr_chase` microbenchmark) and adjust the uncore-frequency targets in
-   [`env/modify-uncore-freq.sh`](env/modify-uncore-freq.sh) /
-   `UNCORE_ARGS` until the slow tier matches. Pinning the frequency without
-   checking the resulting latency is the most common source of invalid
-   tiering results.
+   The reasons for each argument are in
+   [`kernel/README.md`](kernel/README.md#grub). No other boot argument is
+   necessary.
+3. **Modules** - [`kernel/`](kernel/): after the reboot, `./build_modules.sh`
+   builds `tierinit.ko` and `kswapdrst.ko`. Load `tierinit` first, then
+   `kswapdrst` (or let `run.sh` load them). Leave `tierinit` loaded until the
+   next reboot: unloading it may lock up the CPUs.
+4. **Environment** - [`env/`](env/): `sudo ./prepare_environment.sh` (or let
+   the runner do it with `run.sh --prepare-env`).
+5. **Build the runtime** - `make -C src` from the repository root (see
+   [Build the runtime](../README.md#2-build-the-runtime---src)).
+6. **Run** - [`../run/`](../run/): `run.sh` puts every workload in its own
+   cgroup with a cap on its fast-tier (node 0) memory, and `kdemotiond`
+   enforces each cap. See [Fast-tier size](#fast-tier-size) below.
 
-## Set the local (fast-tier) DRAM size
+> **Re-run `prepare_environment.sh` after EVERY reboot.** Its effects are
+> runtime-only and do NOT persist across a reboot. The modules also need
+> loading after a reboot. `run.sh` loads them if they are not loaded.
 
-The fast/slow split is created by making the fast tier (node 0) **physically
-small** with a `memmap=` boot parameter, so first-touch fills node 0 and the
-overflow spills to the slow tier. Do NOT use a cgroup memory limit for this: a
-memcg cap limits total usage (not fast-tier residency) and deadlocks the
-workload in D-state when demotion is disabled.
+The env scripts source each other by their own location, so you can start
+them from any directory (the runner calls
+`../setup/env/prepare_environment.sh`).
 
-### Size node 0 from the workload's RSS
+## Check the CXL emulation (important)
 
-For a target fast:slow ratio `R:1`, set node-0 usable DRAM to
-`RSS x R/(R+1)`:
-
-| Ratio (fast:slow) | node-0 usable DRAM |
-|-------------------|--------------------|
-| 1:1 (paper default) | `RSS / 2` |
-| 1:2 | `RSS / 3` |
-| 8:1 | `RSS x 8/9` |
-
-Measure the workload's RSS first, on an unconstrained boot:
-
-```bash
-/usr/bin/time -v numactl -C 2-9 --membind 0 \
-    env OMP_NUM_THREADS=8 ./bc -f kron.sg -i1 -n1   # "Maximum resident set size"
-```
-
-### Apply memmap
-
-`memmap=<R>G!<off>G` marks the physical range starting at `<off>` with length
-`<R>` as protected memory. This removes that range from ordinary RAM; it does
-not set the remaining fast-tier size. Choose a range within node 0 from the
-host's physical memory map. The example below is specific to its host layout.
-Add the parameter to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, then
-`sudo update-grub` and reboot.
+The slow tier is emulated by a remote NUMA node with its CPUs taken offline
+and its uncore frequency pinned low. `check_cxl_conf` and `run.sh`
+**abort** if Node 1 still has online CPUs (an unchecked layout silently
+produces invalid results). To see the layout yourself:
 
 ```bash
-# c220g5: node 0 is ~95 GB. To leave ~10 GB usable (a 1:1 split for a ~19.5 GB
-# RSS bc-kron), reserve ~86 GB:
-sudo sed -i 's/\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 memmap=86G!2G"/' /etc/default/grub
-sudo update-grub && sudo reboot
-# After reboot, confirm node 0 free ~= RSS/2:
-numactl -H | grep -E 'node 0 (size|free)'   # e.g. size 10676 MB, free ~10 GB
+numactl --hardware        # 'node 1 cpus:' should be empty
 ```
 
-Record node-0 total and free memory after reboot and after workload-input
-preload. Free memory also depends on the kernel, services, file cache and
-PACT metadata; it is not identical to total node capacity. Treat the example
-sizes as approximate and verify the workload's actual placement. For comparisons,
-keep the physical reservation and preload procedure fixed across tiering systems,
-and report runtime memory overhead separately. Do not resize node 0 for each
-policy based on its observed residency.
+The scripts do *not* check the latency. Check it yourself:
+
+**Latency** - the emulated tiers should land near the PACT paper's targets
+(~90 ns local DRAM, ~140 ns remote NUMA, ~190 ns CXL-emulated, see
+[`../modeling/README.md`](../modeling/README.md)). Measure with a
+pointer-chase latency tool (e.g. Intel MLC `--latency_matrix`, or the
+`ptr_chase` microbenchmark) and adjust the uncore-frequency targets in
+[`env/modify-uncore-freq.sh`](env/modify-uncore-freq.sh) /
+`UNCORE_ARGS` until the slow tier matches. Pinning the frequency without
+checking the resulting latency is the most common source of invalid
+tiering results.
+
+## Fast-tier size
+
+Each workload gets its own fast-tier size. `run.sh` creates one cgroup per
+workload and writes the cap to the cgroup's `memory.max_at_node0`. The kernel
+allocates the workload's pages on node 0 up to the cap and then on node 1.
+When a promotion would exceed the cap, the kernel refuses it and wakes
+`kdemotiond`, which demotes cold pages of the same cgroup to node 1. Later
+promotions then find free space under the cap.
+The cap is `<name>_rss x --ratio`, with `<name>_rss` (MB) from
+[`../run/workloads.sh`](../run/workloads.sh).
+
+| Ratio (fast:slow) | `--ratio` | Cap |
+|-------------------|-----------|-----|
+| 1:1 (default) | `0.5` | `RSS x 0.5` |
+| about 1:2 | `0.33` | `RSS x 0.33` (a little below `RSS / 3`) |
+| about 8:1 | `0.89` | `RSS x 0.89` (a little above `RSS x 8/9`) |
+
+`run.sh` cuts the cap to whole MB (`RSS x ratio`, rounded down), so the
+ratio column is approximate.
+
+`memory.max_at_node0` limits only the pages of the cgroup on node 0. Do NOT
+use `memory.max` or `memory.high` for this: they limit the total memory of
+the cgroup, not its fast-tier memory. To measure `_rss`, see
+[`../run/README.md`](../run/README.md#measuring-_rss).
 
 ## Notes
 

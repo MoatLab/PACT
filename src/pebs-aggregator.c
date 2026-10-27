@@ -3,6 +3,7 @@
 
 /* PEBS aggregator - aggregates per-CPU PEBS samples into per-page PAC. */
 
+#include <stddef.h> /* offsetof */
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -29,6 +30,13 @@
 #define PAGE_SIZE sysconf(_SC_PAGESIZE)
 #endif
 
+/* One drained sample, held until its window's S_w is known. */
+typedef struct staged_sample {
+    uint64_t page;     /* Page address */
+    uint32_t workload; /* Owner workload number */
+    uint32_t latency;  /* LDLAT: load latency in cycles (clamped); else 0 */
+} staged_sample_t;
+
 /* PEBS Aggregator Context */
 typedef struct pebs_aggregator {
     /* Per-CPU PEBS contexts from pact.c */
@@ -38,7 +46,12 @@ typedef struct pebs_aggregator {
 
     /* Statistics */
     uint64_t events_per_cpu[64]; /* Support up to 64 CPUs */
-    uint64_t events_per_tier[2]; /* Per-tier PEBS events (workload-scoped) */
+    /* Covered slow-tier samples of this window, per workload and in total
+     * (N in the stall scalar). A sample dropped at a full staging buffer
+     * still counts. */
+    uint64_t samples[MAX_WORKLOADS];
+    uint64_t total_samples;
+    uint64_t pushed[MAX_WORKLOADS]; /* Samples of this window pushed to the PAC ring */
     uint64_t read_events_from_perf;
     uint64_t pushed_events_to_update;
     uint64_t dropped_events_update_full;
@@ -46,11 +59,17 @@ typedef struct pebs_aggregator {
     uint64_t lost_samples;
     uint64_t lost_events;
 
+    /* LDLAT: latency sum and count of this window's samples per workload
+     * that passed the data-source filter, before any software gate (the
+     * k_slow input). */
+    uint64_t ldlat_latency_sum[MAX_WORKLOADS];
+    uint64_t ldlat_latency_count[MAX_WORKLOADS];
+
     /* Round-robin state for fairness */
     int last_cpu_checked;
 
-    /* Back-reference to pact context — used to resolve TGID → workload index
-     * at sample-decode time (replaces the old pidmap khash). */
+    /* Back-reference to pact context: used to resolve TGID -> workload index
+     * at sample-decode time. */
     pact_context_t *pact_ctx;
 
     /* Always-on diagnostic counters (cumulative across run) */
@@ -61,7 +80,7 @@ typedef struct pebs_aggregator {
      * FIRST so the window's total sample count A_t is known before the
      * per-sample stall scalar is computed (Algorithm 1 attributes with
      * same-window counts). Sized to the PAC update ring capacity. */
-    uint64_t *cycle_buf;
+    staged_sample_t *cycle_buf;
     int cycle_buf_cap;
 } pebs_aggregator_t;
 
@@ -89,8 +108,8 @@ pebs_aggregator_t *pebs_aggregator_create(per_cpu_state_t *cpu_states, int num_c
     agg->cpu_mask = cpu_mask;
     agg->last_cpu_checked = 0;
 
-    agg->cycle_buf_cap = 131072; /* == PAC update ring capacity */
-    agg->cycle_buf = malloc((size_t)agg->cycle_buf_cap * sizeof(uint64_t));
+    agg->cycle_buf_cap = PAC_UPDATE_RING_SIZE;
+    agg->cycle_buf = malloc((size_t)agg->cycle_buf_cap * sizeof(*agg->cycle_buf));
     if (!agg->cycle_buf) {
         free(agg->cpu_states);
         free(agg);
@@ -119,9 +138,82 @@ static inline void ring_copy(void *dst, const char *base, uint64_t off, size_t l
     }
 }
 
-/* Read PEBS events from one CPU. REMOTE_DRAM only. */
+/* The workload a sample belongs to, or -1 when the sample is dropped. A
+ * sample of another process is ignored. PACT: a sample of a thread whose
+ * counting group did not cover this window is counted as uncovered.
+ * Tierce: a sample belongs to the workload that owns the CPU; it is
+ * counted as uncovered when the CPU's counting group did not cover this
+ * window. */
+static int sample_workload(pebs_aggregator_t *agg, const per_cpu_state_t *cpu_state, pid_t pid,
+                           pid_t tid)
+{
+    pact_context_t *ctx = agg->pact_ctx;
+    if (ctx->mode == PACT_MODE_TIERCE) {
+        if (cpu_state->owner < 0 || ctx->workloads[cpu_state->owner].target_pid != pid) {
+            return -1;
+        }
+        if (!cpu_state->count_valid) {
+            ctx->workloads[cpu_state->owner].stats.pebs_uncovered++;
+            return -1;
+        }
+        return cpu_state->owner;
+    }
+    int w = pact_find_workload(ctx, pid);
+    if (w < 0) {
+        return -1;
+    }
+    pact_workload_t *wl = &ctx->workloads[w];
+    if (!workload_covers_tid(wl, tid)) {
+        wl->stats.pebs_uncovered++;
+        return -1;
+    }
+    return w;
+}
+
+/* perf_mem_data_src of a remote-DRAM (slow-tier) load: the legacy mem_lvl
+ * REM_RAM1/REM_RAM2 bits, or the newer encoding (level RAM, remote). Some
+ * kernels report Skylake's remote-DRAM data source only in the newer one. */
+static inline bool is_remote_ram(uint64_t data_src)
+{
+    uint64_t mem_lvl = (data_src >> PERF_MEM_LVL_SHIFT) & 0x3FFF;
+    uint64_t lvl_num = (data_src >> PERF_MEM_LVLNUM_SHIFT) & 0xF;
+    uint64_t remote = (data_src >> PERF_MEM_REMOTE_SHIFT) & 0x1;
+    if (mem_lvl & (PERF_MEM_LVL_REM_RAM1 | PERF_MEM_LVL_REM_RAM2)) {
+        return true;
+    }
+    return remote && lvl_num == PERF_MEM_LVLNUM_RAM;
+}
+
+/* LDLAT filter of one covered sample, in order: the data-source filter
+ * keeps remote-DRAM loads; every kept load feeds the workload's k_slow
+ * input; then the software gate drops loads below --ldlat-gate, and the
+ * LDLAT-Dyn gate applies when it runs. Returns true when the sample is
+ * kept. */
+static bool ldlat_keep(pebs_aggregator_t *agg, int w, uint32_t latency, uint64_t data_src)
+{
+    pact_context_t *ctx = agg->pact_ctx;
+    pact_workload_t *wl = &ctx->workloads[w];
+    if (!is_remote_ram(data_src)) {
+        wl->ldlat_filtered++;
+        return false;
+    }
+    agg->ldlat_latency_sum[w] += latency;
+    agg->ldlat_latency_count[w]++;
+    if (ctx->ldlat_gate > LDLAT_HW_THRESHOLD && latency < ctx->ldlat_gate) {
+        wl->ldlat_gated++;
+        return false;
+    }
+    if (ctx->ldlat_dyn.enabled && !ldlat_dyn_admit(&ctx->ldlat_dyn, latency)) {
+        wl->ldlat_gated++;
+        return false;
+    }
+    return true;
+}
+
+/* Read PEBS events from one CPU into staged samples: slow-tier LLC-miss
+ * loads, or LDLAT loads that pass the LDLAT filter. */
 static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_state,
-                                uint64_t *events, int max_events)
+                                staged_sample_t *events, int max_events)
 {
     if (!cpu_state || cpu_state->fd_pebs < 0 || !cpu_state->pebs_mmap) {
         return 0;
@@ -164,9 +256,10 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
      * end of the buffer. Reassemble each record into a small linear scratch
      * buffer before reading its fields, so a wrapping record is handled
      * correctly instead of reading past the mapping. Our records are tiny
-     * (header + TID + TIME + ADDR), so a fixed scratch is sufficient.
+     * (header, TID and ADDR, plus WEIGHT and DATA_SRC with LDLAT), so a
+     * fixed scratch is sufficient.
      */
-    pact_stats_t *quality = &agg->pact_ctx->workload->stats;
+    pact_stats_t *quality = &agg->pact_ctx->stats;
     if (head - tail > data_size) {
         quality->pebs_overruns++;
         __sync_synchronize();
@@ -194,26 +287,37 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
             /*
              * Sample layout (ordered by sample_type bit position):
              *   PERF_SAMPLE_TID:      { u32 pid, tid; }
-             *   PERF_SAMPLE_TIME:     { u64 time; }
              *   PERF_SAMPLE_ADDR:     { u64 addr; }
+             *   PERF_SAMPLE_WEIGHT_STRUCT: { union perf_sample_weight; }  LDLAT only
+             *   PERF_SAMPLE_DATA_SRC:      { u64 data_src; }              LDLAT only
              */
             struct {
                 struct perf_event_header header;
                 uint32_t pid;
                 uint32_t tid;
-                uint64_t time;
                 uint64_t addr;
+                uint64_t weight;
+                uint64_t data_src;
             } rec;
-            if (hdr.size >= sizeof(rec)) {
-                ring_copy(&rec, data, off, sizeof(rec), data_size);
-                if (is_target_pid(agg->pact_ctx, (pid_t)rec.pid)) {
-                    if (agg->pact_ctx->workload->counters_valid &&
-                        workload_covers_tid(agg->pact_ctx->workload, (pid_t)rec.tid)) {
-                        events[count++] = PEBS_ENCODE_ADDR_TIER(rec.addr, 1);
-                        agg->events_per_tier[1]++;
-                    } else {
-                        quality->pebs_uncovered++;
+            bool ldlat = agg->pact_ctx->use_ldlat;
+            size_t need = ldlat ? sizeof(rec) : offsetof(__typeof__(rec), weight);
+            if (hdr.size >= need) {
+                ring_copy(&rec, data, off, need, data_size);
+                int w = sample_workload(agg, cpu_state, (pid_t)rec.pid, (pid_t)rec.tid);
+                uint32_t latency = 0;
+                if (w >= 0 && ldlat) {
+                    /* Instruction latency where reported, else var1_dw. */
+                    union perf_sample_weight pw = {.full = rec.weight};
+                    latency = pw.var2_w ? pw.var2_w : pw.var1_dw;
+                    if (!ldlat_keep(agg, w, latency, rec.data_src)) {
+                        w = -1;
                     }
+                }
+                if (w >= 0) {
+                    events[count++] = (staged_sample_t){
+                        .page = rec.addr & PAGE_MASK, .workload = (uint32_t)w, .latency = latency};
+                    agg->samples[w]++;
+                    agg->total_samples++;
                 }
             } else {
                 quality->pebs_malformed++;
@@ -261,49 +365,74 @@ static int read_cpu_pebs_events(pebs_aggregator_t *agg, per_cpu_state_t *cpu_sta
 }
 
 /* Aggregate PEBS events from all CPUs and push directly to PAC update ring */
-/* Per-sample stall attribution = the cycle's per-tier scalar.
+/* Per-sample stall attribution = the cycle's slow-tier scalar.
  * PEBS_ENCODE_PAC packs the PAC value into 18 bits, so clamp to 262143 here:
  * a larger value would be silently truncated by the encoder and corrupt the
  * PAC score. */
 #define PAC_VALUE_MAX 262143u
-static inline uint32_t compute_sample_stalls(uint8_t tier, double fast_stalls, double slow_stalls)
+static inline uint32_t compute_sample_stalls(double slow_stalls)
 {
-    double base = (tier == 0) ? fast_stalls : slow_stalls;
-    if (base < 0.0) {
+    if (slow_stalls < 0.0) {
         return 0;
     }
-    if (base > (double)PAC_VALUE_MAX) {
+    if (slow_stalls > (double)PAC_VALUE_MAX) {
         return PAC_VALUE_MAX;
     }
-    return (uint32_t)base;
+    return (uint32_t)slow_stalls;
 }
 
-/* Decode one PEBS sample into address/tier. */
-static inline void decode_pebs_sample(const uint64_t *events, int i, uint64_t *out_addr,
-                                      uint8_t *out_tier)
+/* Global attributed stalls = k_constant * llc_misses / (mlp * events), with
+ * the LLC misses and samples of every workload and the global MLP; every
+ * sample of the window gets the same scalar. The /pebs_sampling_period
+ * division is intentionally absent: ring drops and lost samples break
+ * the ideal ev≈miss/period identity, so we let PAC scale with observed
+ * sample population instead. */
+static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *agg, double *stalls)
 {
-    uint64_t encoded = events[i];
-    *out_addr = PEBS_DECODE_ADDR(encoded);
-    *out_tier = PEBS_DECODE_TIER(encoded);
-}
-
-/* Per-workload attributed stalls = k_constant * llc_misses / (mlp * events).
- * The /pebs_sampling_period division is intentionally absent: LDLAT filtering,
- * ring drops, and quiet-skip losses break the ideal ev≈miss/period identity,
- * so we let PAC scale with observed sample population instead. */
-static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *agg,
-                                      double *out_fast_stalls, double *out_slow_stalls)
-{
-    *out_fast_stalls = 0.0;
-    *out_slow_stalls = 0.0;
-    pact_workload_t *wl = ctx->workload;
-    double fast_coeff = wl->workload_mlp_fast * agg->events_per_tier[0];
-    double slow_coeff = wl->workload_mlp_slow * agg->events_per_tier[1];
-    if (fast_coeff > 0) {
-        *out_fast_stalls = (ctx->k_constant_dram * wl->stats.llc_misses_fast) / fast_coeff;
+    if (ctx->mode == PACT_MODE_TIERCE) {
+        /* Tierce: S_w = k * LLCmiss_w / (MLP_w * N_w * P) per workload, with
+         * the workload MLP and the counts of this window. */
+        for (int w = 0; w < ctx->nr_workloads; w++) {
+            pact_workload_t *wl = &ctx->workloads[w];
+            double coeff = wl->mlp * (double)agg->samples[w] * (double)ctx->pebs_sampling_period;
+            stalls[w] =
+                coeff > 0
+                    ? ((double)ctx->k_constant_cxl * (double)wl->stats.llc_misses_slow) / coeff
+                    : 0.0;
+        }
+        return;
     }
-    if (slow_coeff > 0) {
-        *out_slow_stalls = (ctx->k_constant_cxl * wl->stats.llc_misses_slow) / slow_coeff;
+    uint64_t llc_misses = 0;
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        llc_misses += ctx->workloads[w].stats.llc_misses_slow;
+    }
+    double global = 0.0;
+    double coeff = ctx->global_mlp * (double)agg->total_samples;
+    if (coeff > 0) {
+        global = ((double)ctx->k_constant_cxl * (double)llc_misses) / coeff;
+    }
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        stalls[w] = global;
+    }
+}
+
+/* LDLAT: after the window's samples were scored, move each workload's
+ * k_slow toward the mean latency of its samples that passed the
+ * data-source filter (EWMA weight 0.3 for the new mean, floor 1 cycle). A
+ * workload without such samples keeps its k_slow. */
+#define LDLAT_K_SLOW_BETA 0.3
+static void update_ldlat_baselines(pebs_aggregator_t *agg, pact_context_t *ctx)
+{
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        if (agg->ldlat_latency_count[w] == 0) {
+            continue;
+        }
+        pact_workload_t *wl = &ctx->workloads[w];
+        double mean = (double)agg->ldlat_latency_sum[w] / (double)agg->ldlat_latency_count[w];
+        wl->k_slow = LDLAT_K_SLOW_BETA * mean + (1.0 - LDLAT_K_SLOW_BETA) * wl->k_slow;
+        if (wl->k_slow < 1.0) {
+            wl->k_slow = 1.0;
+        }
     }
 }
 
@@ -311,9 +440,9 @@ static void compute_attributed_stalls(pact_context_t *ctx, pebs_aggregator_t *ag
  * Drain, attribute, and publish one window's PEBS samples.
  *
  * Phase A drains every CPU's perf buffer into cycle_buf so the window's
- * per-tier sample population is known; phase B then computes the per-tier
- * stall scalar from THIS window's counters and counts (Algorithm 1: S_p =
- * S * A_p / A_t with all terms from the same window) and pushes each
+ * sample population is known; phase B then computes the slow-tier
+ * stall scalar from THIS window's counters and counts (Algorithm 1: each
+ * sample gets S * A_p / A_t, with all terms from the same window) and pushes each
  * attributed sample to the PAC update ring.
  */
 int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
@@ -345,45 +474,67 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
         /* Staging full: exhaust this CPU's perf buffer into drop counters
          * so the producer ring cannot wedge. */
         if (n == agg->cycle_buf_cap) {
-            uint64_t scratch[512];
+            staged_sample_t scratch[512];
             int dropped;
             while ((dropped = read_cpu_pebs_events(agg, cpu_state, scratch, 512)) > 0) {
                 agg->read_events_from_perf += dropped;
                 agg->dropped_events_update_full += dropped;
-                ctx->workload->stats.pebs_update_drops += dropped;
+                ctx->stats.pebs_update_drops += dropped;
                 agg->dropped_events_workload += dropped;
             }
         }
     }
     agg->last_cpu_checked = (agg->last_cpu_checked + 1) % agg->num_cpus;
 
-    /* Phase B: same-window attribution. events_per_tier was populated by
-     * the phase-A reads; the LLC-miss and MLP inputs were read from the
+    /* Phase B: same-window attribution. The sample counts were populated
+     * by the phase-A reads; the LLC-miss and MLP inputs were read from the
      * PMU for this same window just before this call. */
-    double fast_stalls = 0.0, slow_stalls = 0.0;
-    compute_attributed_stalls(ctx, agg, &fast_stalls, &slow_stalls);
+    double stalls[MAX_WORKLOADS] = {0};
+    compute_attributed_stalls(ctx, agg, stalls);
 
+    /* Tierce keeps one ring slot free for the entry that ends the epoch. */
+    bool tierce = ctx->mode == PACT_MODE_TIERCE;
+    size_t room =
+        ctx->pac_update_ring->size - 1 - ring_buffer_pac_update_size(ctx->pac_update_ring);
+    if (tierce) {
+        room = room > 0 ? room - 1 : 0;
+    }
     int pac_count = 0;
     for (int i = 0; i < n; i++) {
-        uint64_t addr;
-        uint8_t tier;
-        decode_pebs_sample(agg->cycle_buf, i, &addr, &tier);
-        uint64_t page = addr & PAGE_MASK;
-        uint32_t attributed = compute_sample_stalls(tier, fast_stalls, slow_stalls);
-        log_pebs_sample(ctx, "pebs_aggregate_events", 0, addr, tier, attributed);
+        const staged_sample_t *sample = &agg->cycle_buf[i];
+        double sample_stall = stalls[sample->workload];
+        if (ctx->use_ldlat) {
+            /* S_p = S_w * latency / k_slow, with k_slow from before this
+             * window's update (update_ldlat_baselines runs after scoring). */
+            sample_stall =
+                sample_stall * (double)sample->latency / ctx->workloads[sample->workload].k_slow;
+        }
+        uint32_t attributed = compute_sample_stalls(sample_stall);
+        log_pebs_sample(ctx, "pebs_aggregate_events", (int)sample->workload, sample->page,
+                        PMU_TIER_SLOW, attributed);
 
-        uint64_t pac_encoded = PEBS_ENCODE_PAC(attributed, page, tier);
-        if (ring_buffer_uint64_push(ctx->pac_update_ring, pac_encoded) == 0) {
+        pac_update_t update = {.encoded = PEBS_ENCODE_PAC(attributed, sample->page, PMU_TIER_SLOW),
+                               .workload = sample->workload};
+        if ((size_t)pac_count >= room ||
+            !ring_buffer_pac_update_push(ctx->pac_update_ring, update)) {
             /* Ring full; the adaptive coroutine drains it on this same
              * thread, so nothing frees up mid-loop. Drop the rest. */
             agg->dropped_events_update_full += (uint64_t)(n - i);
-            ctx->workload->stats.pebs_update_drops += (uint64_t)(n - i);
+            ctx->stats.pebs_update_drops += (uint64_t)(n - i);
             break;
         }
+        agg->pushed[sample->workload]++;
         pac_count++;
+    }
+    if (tierce && pac_count > 0) {
+        pac_update_t end = {.encoded = 0, .workload = PAC_UPDATE_EPOCH_END};
+        ring_buffer_pac_update_push(ctx->pac_update_ring, end);
     }
 
     agg->pushed_events_to_update += pac_count;
+    if (ctx->use_ldlat) {
+        update_ldlat_baselines(agg, ctx);
+    }
 
     agg->aggregation_cycles_total++;
     if ((uint64_t)pac_count > agg->aggregation_max_samples_cycle) {
@@ -397,6 +548,11 @@ int pebs_aggregate_events(pebs_aggregator_t *agg, pact_context_t *ctx)
  * iteration. */
 static void reset_per_cycle_counters(pebs_aggregator_t *agg)
 {
+    memset(agg->samples, 0, sizeof(agg->samples));
+    memset(agg->pushed, 0, sizeof(agg->pushed));
+    memset(agg->ldlat_latency_sum, 0, sizeof(agg->ldlat_latency_sum));
+    memset(agg->ldlat_latency_count, 0, sizeof(agg->ldlat_latency_count));
+    agg->total_samples = 0;
     agg->read_events_from_perf = 0;
     agg->pushed_events_to_update = 0;
     agg->dropped_events_update_full = 0;
@@ -414,15 +570,67 @@ static bool poll_and_update_threads(pact_context_t *ctx, int debug_counter)
 
 static void log_workload_pebs_stats(pact_context_t *ctx, pebs_aggregator_t *agg)
 {
-    pact_workload_t *wl = ctx->workload;
-    uint64_t theory =
-        (wl->stats.llc_misses_fast + wl->stats.llc_misses_slow) / ctx->pebs_sampling_period;
-    uint64_t processed = agg->events_per_tier[0] + agg->events_per_tier[1];
-    log_pebs_aggregator(ctx, "pebs_aggregator_coroutine", 0, theory, processed, agg->lost_events,
-                        agg->lost_samples, 0, agg->dropped_events_workload);
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        pact_workload_t *wl = &ctx->workloads[w];
+        uint64_t theory = wl->stats.llc_misses_slow / ctx->pebs_sampling_period;
+        log_pebs_aggregator(ctx, "pebs_aggregator_coroutine", w, theory, agg->samples[w],
+                            agg->lost_events, agg->lost_samples, 0, agg->dropped_events_workload);
+    }
 }
 
-/* Modified PEBS coroutine that uses aggregator */
+/* Refresh the task groups of every live workload while counters are
+ * stopped. A workload exits only when its pidfd reports the exit: it is
+ * marked exited and leaves sampling, and its groups close once. A refresh
+ * that finds every thread gone while the pidfd has not fired (the threads
+ * are exiting, PF_EXITING, but the process has not reached exit_notify())
+ * keeps the workload: it has no group in the next window, and the next
+ * window refreshes it again. Any
+ * other failure stops sampling. Returns -1 when sampling must stop. */
+static int refresh_counting_groups(pact_context_t *ctx)
+{
+    if (ctx->mode == PACT_MODE_TIERCE) {
+        return 0; /* per-CPU groups do not depend on the task population */
+    }
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        pact_workload_t *wl = &ctx->workloads[w];
+        if (!wl->exited) {
+            int refreshed = setup_workload_counting_events(wl);
+            if (refreshed == 0) {
+                continue;
+            }
+            if (refreshed == PACT_WORKLOAD_GONE) {
+                if (!pact_workload_exited(ctx, wl)) {
+                    if (wl->threads) {
+                        cleanup_workload_counting_events(wl); /* clears wl->threads */
+                    }
+                    if (ctx->sampling_failed) {
+                        return -1; /* the pidfd query failed */
+                    }
+                    log_debug("pebs_aggregator_coroutine",
+                              "Workload %d (PID %d): no live thread, but its pidfd reports no "
+                              "exit; it stays",
+                              w, (int)wl->target_pid);
+                    continue;
+                }
+            } else if (!pact_workload_exited(ctx, wl)) {
+                if (!ctx->sampling_failed) {
+                    log_error("pebs_aggregator_coroutine",
+                              "Failed to refresh task counter coverage of workload %d", w);
+                    ctx->sampling_failed = true;
+                    ctx->running = false;
+                }
+                return -1;
+            }
+        }
+        if (wl->threads) {
+            cleanup_workload_counting_events(wl); /* clears wl->threads */
+        }
+    }
+    return 0;
+}
+
+/* PEBS coroutine: one sampling window per tick, all CPUs through the
+ * aggregator */
 void pebs_aggregator_coroutine(mco_coro *co)
 {
     pact_context_t *ctx = (pact_context_t *)mco_get_user_data(co);
@@ -440,12 +648,10 @@ void pebs_aggregator_coroutine(mco_coro *co)
     int debug_counter = 0;
 
     while (ctx->running) {
-        reset_per_cycle_counters(agg);
-        /* Fresh per-tier sample counts for this window; phase A of
+        /* Fresh sample counts for this window; phase A of
          * pebs_aggregate_events repopulates them from the drained samples
          * so attribution divides by this window's population. */
-        agg->events_per_tier[0] = 0;
-        agg->events_per_tier[1] = 0;
+        reset_per_cycle_counters(agg);
 
         /* turn off pmu counters */
         stop_pmu_perf_events(ctx);
@@ -457,7 +663,7 @@ void pebs_aggregator_coroutine(mco_coro *co)
         read_pmu_counting_events(ctx);
 
         if (poll_and_update_threads(ctx, debug_counter)) {
-            log_info("pebs_aggregator_coroutine", "Workload has exited, stopping PACT");
+            log_info("pebs_aggregator_coroutine", "All workloads have exited, stopping PACT");
             ctx->running = false;
             mco_yield(co);
             break;
@@ -466,27 +672,40 @@ void pebs_aggregator_coroutine(mco_coro *co)
         /* Keep the old task population and counters stopped until its samples
          * have been attributed. Newly created tasks join the next window. */
         int aggregated = pebs_aggregate_events(agg, ctx);
-        if (setup_workload_counting_events(ctx->workload) < 0) {
-            if (pact_check_all_targets_exited(ctx)) {
-                ctx->running = false;
-                break;
-            }
-            log_error("pebs_aggregator_coroutine", "Failed to refresh task counter coverage");
-            ctx->sampling_failed = true;
+        if (ctx->mode == PACT_MODE_TIERCE) {
+            /* The window's epoch-end marker is in the PAC ring: run the PAC
+             * step next, so admission follows the window at once. */
+            ctx->timing[CORO_TYPE_PAC].next_tsc = rdtsc();
+        }
+        if (refresh_counting_groups(ctx) < 0) {
+            break;
+        }
+        if (pact_check_all_targets_exited(ctx)) {
             ctx->running = false;
             break;
         }
         start_pmu_perf_events(ctx);
-        ctx->timing[CORO_TYPE_PEBS].next_tsc = rdtsc() + ms_to_tsc(ctx, ctx->sampling_interval_ms);
+        if (ctx->mode != PACT_MODE_TIERCE) {
+            /* PACT: the next window starts one sampling interval after this
+             * window's work. */
+            ctx->timing[CORO_TYPE_PEBS].next_tsc =
+                rdtsc() + ms_to_tsc(ctx, ctx->sampling_interval_ms);
+        }
+        /* Tierce keeps the deadline that the event loop set when this tick
+         * started: a PAC epoch ends every sampling interval (20 ms by
+         * default). */
 
-        /* Accumulate per-workload PEBS samples into cumulative counter */
-        ctx->workload->total_pebs_samples += agg->events_per_tier[0] + agg->events_per_tier[1];
-
-        /* Log workload PMU stats (after aggregation so event counts are available) */
-        log_pmu(ctx, "pebs_aggregator_coroutine", 0, ctx->workload->workload_mlp_fast,
-                ctx->workload->workload_mlp_slow, ctx->workload->stats.llc_misses_fast,
-                ctx->workload->stats.llc_misses_slow, agg->events_per_tier[0],
-                agg->events_per_tier[1]);
+        for (int w = 0; w < ctx->nr_workloads; w++) {
+            pact_workload_t *wl = &ctx->workloads[w];
+            /* Accumulate per-workload PEBS samples into cumulative counter */
+            wl->total_pebs_samples += agg->samples[w];
+            wl->stats.pebs_events_processed += agg->pushed[w];
+            ctx->domains[wl->domain].samples += agg->pushed[w];
+            /* Log workload PMU stats (after aggregation so event counts are available) */
+            double mlp = (ctx->mode == PACT_MODE_TIERCE) ? wl->mlp : ctx->global_mlp;
+            log_pmu(ctx, "pebs_aggregator_coroutine", w, mlp, wl->stats.llc_misses_slow,
+                    agg->samples[w]);
+        }
 
         if (aggregated == 0) {
             /* No events available - yield */
@@ -499,7 +718,6 @@ void pebs_aggregator_coroutine(mco_coro *co)
             continue;
         } else {
             ctx->sample_counts += aggregated;
-            ctx->workload->stats.pebs_events_processed += aggregated;
             log_debug("pebs_aggregator_coroutine", "PEBS aggregator: Pushed %d events to PAC ring",
                       aggregated);
             debug_counter = 0;
@@ -507,17 +725,13 @@ void pebs_aggregator_coroutine(mco_coro *co)
 
         log_workload_pebs_stats(ctx, agg);
 
-        /* Mark PAC coroutine ready if the ring has data to drain. */
-        if (ring_buffer_uint64_size(ctx->pac_update_ring) > 0) {
-        }
-
         mco_yield(co);
     }
 
     log_info("pebs_aggregator_coroutine", "PEBS Aggregator: Exiting");
 }
 
-/* Setup PEBS aggregator for unified context */
+/* Setup PEBS aggregator for the PACT context */
 int setup_pebs_aggregator(pact_context_t *ctx, per_cpu_state_t *cpu_states, int num_cpus,
                           uint64_t cpu_mask)
 {
@@ -538,8 +752,10 @@ int setup_pebs_aggregator(pact_context_t *ctx, per_cpu_state_t *cpu_states, int 
     /* Mark PEBS as available via aggregator */
     ctx->pebs_available = true;
 
-    log_info("setup_pebs_aggregator", "PEBS filtering enabled for PID %d",
-             ctx->workload->target_pid);
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        log_info("setup_pebs_aggregator", "PEBS filtering enabled for PID %d",
+                 (int)ctx->workloads[w].target_pid);
+    }
     log_info("setup_pebs_aggregator", "PEBS aggregator setup complete");
     return 0;
 }

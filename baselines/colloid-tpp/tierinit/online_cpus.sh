@@ -1,6 +1,6 @@
 #!/bin/bash
-# Bring the slow-tier CPUs back online (reverse of offline_cpus.sh). Edit the
-# CPU list to match your machine. Requires root.
+# Bring the slow-tier CPUs back online (reverse of offline_cpus.sh). The CPU
+# list below is an example. Edit it to match your machine. Requires root.
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run as root (sudo)"; exit 1; }
 

@@ -17,10 +17,8 @@ static const int skx_core_to_tid[10] = {0x00, 0x10, 0x20, 0x30, 0x40, 0x08, 0x18
 /*
  * Sapphire/Emerald Rapids CHA-to-core mapping. Both uarchs share the same
  * server CHA design and TOR event encodings, so one descriptor covers both.
- * SPR (Xeon Gold 6430) exposes 32 uncore_cha devices, all usable. EMR (Xeon
- * Gold 6530) exposes 64 but only CHAs 0-31 return non-zero TOR counters; the
- * upper half reads zero and is filtered out during discovery (cha_offset >=
- * nr_cha_mapping in filter_active_chas).
+ * The descriptor maps CHA offsets 0-31. Discovery skips the CHAs at offset
+ * 32 and above (cha_offset >= nr_cha_mapping in filter_active_chas).
  */
 static const int emr_cha_to_core_map[32] = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
                                             11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
@@ -82,6 +80,13 @@ static const pmu_platform_t platform_skx = {
     .name = "Skylake-X",
     .event_llc_miss_local = 0x01d3,
     .event_llc_miss_remote = 0x02d3,
+    .event_llc_miss_any = 0x03d3,
+    .event_stalls_l3_miss = 0x60006a3,
+    .event_instructions = 0x00c0,
+    .event_cycles = 0x003c,
+    .event_llc_miss_all = 0x412e,
+    .event_offcore_dd_out = 0x0160,
+    .event_offcore_dd = 0x01b0,
     .nr_cha_mapping = 10,
     .cha_to_core_map = skx_cha_to_core_map,
     .core_to_tid = skx_core_to_tid,
@@ -109,8 +114,8 @@ static const pmu_platform_t platform_skx = {
  * the SPR/EMR encoding: the opcode match (DRD, local vs remote) lives in the
  * extended umask (config bits 32-55) inside tor_base, so config1_base is 0,
  * and the TID-enable bit is config:16. tor_base and the DRD opcode-match ext
- * bits (0xc816fe local, 0xc8177e remote) were validated on real SPR (hds04)
- * and EMR (hds06) silicon against Intel perfmon; see the validation notes.
+ * bits (0xc816fe local, 0xc8177e remote) were validated on real SPR
+ * and EMR silicon against Intel perfmon.
  *
  * NOTE: k_constant_dram / k_constant_cxl are still the SKX values pending
  * per-uarch latency calibration on SPR/EMR.
@@ -120,14 +125,21 @@ static const pmu_platform_t platform_emr = {
     .name = "Sapphire/Emerald Rapids",
     .event_llc_miss_local = 0x01d3,
     .event_llc_miss_remote = 0x02d3,
+    .event_llc_miss_any = 0x03d3,
+    .event_stalls_l3_miss = 0x60006a3,
+    .event_instructions = 0x00c0,
+    .event_cycles = 0x003c,
+    .event_llc_miss_all = 0x412e,
+    .event_offcore_dd_out = 0x0120,
+    .event_offcore_dd = 0x0121,
     .nr_cha_mapping = 32,
     .cha_to_core_map = emr_cha_to_core_map,
     .core_to_tid = emr_core_to_tid,
     .tor_base =
         {
-            /* [TOR_OCC][local], [TOR_OCC][remote] — DRD opcode in ext umask. */
+            /* [TOR_OCC][local], [TOR_OCC][remote]: DRD opcode in ext umask. */
             {0x00c816fe00000136ULL, 0x00c8177e00000136ULL},
-            /* [TOR_CYC][local], [TOR_CYC][remote] — cycles with >=1 outstanding. */
+            /* [TOR_CYC][local], [TOR_CYC][remote]: cycles with >=1 outstanding. */
             {0x00c816fe0100011fULL, 0x00c8177e0100011fULL},
         },
     .config1_base = {0, 0}, /* opcode is in config ext umask, not config1 */
@@ -165,10 +177,19 @@ int pmu_platform_init(void)
     printf("PMU platform detected: %s\n", g_pmu_platform.name);
 
     extern event_config_t core_event_configs[CORE_EVENT_COUNT];
-    core_event_configs[CORE_EVENT_LLC_MISS_FAST] =
-        (event_config_t){g_pmu_platform.event_llc_miss_local, "LLC_MISS_FAST"};
     core_event_configs[CORE_EVENT_LLC_MISS_SLOW] =
         (event_config_t){g_pmu_platform.event_llc_miss_remote, "LLC_MISS_SLOW"};
+
+    cpu_event_configs[CPU_EVENT_LLC_MISS_SLOW] = core_event_configs[CORE_EVENT_LLC_MISS_SLOW];
+    cpu_event_configs[CPU_EVENT_INSTRUCTIONS] =
+        (event_config_t){g_pmu_platform.event_instructions, "INSTRUCTIONS"};
+    cpu_event_configs[CPU_EVENT_CYCLES] = (event_config_t){g_pmu_platform.event_cycles, "CYCLES"};
+    cpu_event_configs[CPU_EVENT_LLC_MISS_ALL] =
+        (event_config_t){g_pmu_platform.event_llc_miss_all, "LLC_MISS_ALL"};
+    cpu_event_configs[CPU_EVENT_OFFCORE_DD_OUT] =
+        (event_config_t){g_pmu_platform.event_offcore_dd_out, "OFFCORE_DD_OUTSTANDING"};
+    cpu_event_configs[CPU_EVENT_OFFCORE_DD] =
+        (event_config_t){g_pmu_platform.event_offcore_dd, "OFFCORE_DD"};
 
     return (id == PMU_PLATFORM_UNKNOWN) ? -1 : 0;
 }

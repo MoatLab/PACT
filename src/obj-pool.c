@@ -2,11 +2,11 @@
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 
 /*====================================================================*
- * pool.c – O(1) object‑pool implementation (see pool.h)
+ * obj-pool.c: O(1) object-pool implementation (see obj-pool.h)
  *
  * Features:
- *   -  Constant‑time allocation / free (push‑pop on a free‑list)
- *   -  Dynamic growth (chunks) – amortised O(1) cost
+ *   -  Constant-time allocation / free (push-pop on a free-list)
+ *   -  Dynamic growth (chunks), amortised O(1) cost
  *   -  Optional backing with Linux hugetlb huge pages
  *====================================================================*/
 
@@ -24,7 +24,6 @@
 #include <stdbool.h>
 #include <stdalign.h> /* alignof()               */
 #include <stdint.h>   /* SIZE_MAX                */
-/* pthread.h removed - single-threaded coroutine design */
 
 /*--------------------------------------------------------------------
  *  Internal data structures
@@ -38,25 +37,23 @@ typedef struct pool_chunk {
 } pool_chunk;
 
 /* The opaque type becomes visible only inside this translation unit */
-/* Thread cache removed - single-threaded coroutine design */
 
 struct object_pool {
     size_t element_size;   /* size requested by the user          */
     size_t object_size;    /* padded size (≥ element_size, ≥ void*) */
     size_t chunk_capacity; /* objects per growth chunk            */
-    void *free_list;       /* head of free‑list (singly linked)   */
+    void *free_list;       /* head of free-list (singly linked)   */
     pool_chunk *chunks;    /* all allocated chunks                */
     size_t total_capacity; /* Σ objects across all chunks          */
-    size_t free_count;     /* objects currently on the free‑list   */
+    size_t free_count;     /* objects currently on the free-list   */
     bool use_hugepages;    /* try MAP_HUGETLB on Linux            */
-    /* mutex removed - single-threaded coroutine design               */
 };
 
 /*--------------------------------------------------------------------
  *  Helper utilities (static)
  *-------------------------------------------------------------------*/
 
-/* Align `n` up to the next multiple of `align`. `align` must be a power‑of‑2 */
+/* Align `n` up to the next multiple of `align`. `align` must be a power-of-2 */
 static inline size_t align_up(size_t n, size_t align)
 {
     return (n + align - 1) & ~(align - 1);
@@ -76,8 +73,8 @@ static inline size_t align_up(size_t n, size_t align)
  *   platform that supports MAP_HUGETLB we try a MAP_HUGETLB mmap().
  *   If that fails we fall back to ordinary malloc().
  *
- *   out_is_huge      – receives true if a huge‑page mapping succeeded.
- *   out_actual_bytes – receives the true size of the allocation (may be larger
+ *   out_is_huge      - receives true if a huge-page mapping succeeded.
+ *   out_actual_bytes - receives the true size of the allocation (may be larger
  *                      than the requested size when MAP_HUGETLB is used).
  *
  *   Returns a pointer to the usable memory block (or NULL on error).
@@ -89,7 +86,7 @@ static void *alloc_chunk_memory(size_t bytes, bool want_huge, bool *out_is_huge,
     bool is_huge = false;
     size_t actual = bytes;
 
-/*--------------------- try huge‑pages (if requested) ----------------*/
+/*--------------------- try huge-pages (if requested) ----------------*/
 #if HAVE_HUGETLB
     if (want_huge) {
         const size_t huge_page = 2 * 1024 * 1024; /* 2 MiB default */
@@ -100,8 +97,8 @@ static void *alloc_chunk_memory(size_t bytes, bool want_huge, bool *out_is_huge,
             is_huge = true;
             actual = aligned;
         } else {
-            /* Huge‑page allocation failed – fall back to malloc() */
-            perror("mmap MAP_HUGETLB failed – falling back to malloc");
+            /* Huge-page allocation failed: fall back to malloc() */
+            perror("mmap MAP_HUGETLB failed: falling back to malloc");
             mem = NULL;
         }
     }
@@ -131,7 +128,7 @@ static void *alloc_chunk_memory(size_t bytes, bool want_huge, bool *out_is_huge,
  * pool_add_chunk()
  *
  *   Allocate a new chunk containing `count` objects, push all objects onto
- *   the free‑list and update bookkeeping.
+ *   the free-list and update bookkeeping.
  *
  *   Returns 0 on success, -1 on error (errno set).
  */
@@ -177,7 +174,7 @@ static int pool_add_chunk(object_pool *pool, size_t count)
 
     pool->total_capacity += count;
 
-    /* Initialise the free‑list with the new objects (LIFO order) */
+    /* Initialise the free-list with the new objects (LIFO order) */
     char *base = (char *)mem;
     for (size_t i = 0; i < count; ++i) {
         void *obj = base + i * pool->object_size;
@@ -209,8 +206,8 @@ object_pool *pool_create(size_t element_size, size_t initial_capacity, size_t ch
 
     /* --------------------------------------------------------------
      *   Compute the actual size of each object that lives inside the
-     *   pool.  We need enough space for the user‑requested data
-     *   *and* a pointer (for the free‑list) and we must honour the
+     *   pool.  We need enough space for the user-requested data
+     *   *and* a pointer (for the free-list) and we must honour the
      *   strictest alignment required by the platform.
      * -------------------------------------------------------------- */
     size_t min_obj = sizeof(void *);         /* space for next pointer   */
@@ -226,8 +223,6 @@ object_pool *pool_create(size_t element_size, size_t initial_capacity, size_t ch
     p->total_capacity = 0;
     p->free_count = 0;
     p->use_hugepages = use_hugepages;
-
-    /* mutex init removed - single-threaded */
 
     if (initial_capacity) {
         if (pool_add_chunk(p, initial_capacity) != 0) {
@@ -256,7 +251,6 @@ void pool_destroy(object_pool *pool)
         free(c);
         c = next;
     }
-    /* mutex destroy removed - single-threaded */
     free(pool);
 }
 
@@ -265,7 +259,7 @@ void pool_destroy(object_pool *pool)
 static void *pool_alloc_simple(object_pool *pool)
 {
     if (pool->free_list == NULL) {
-        /* No free objects – try to grow the pool */
+        /* No free objects: try to grow the pool */
         if (pool_add_chunk(pool, pool->chunk_capacity) != 0) {
             return NULL; /* out of memory */
         }
@@ -291,7 +285,7 @@ void *pool_alloc_zero(object_pool *pool)
 {
     void *obj = pool_alloc_simple(pool);
     if (obj) {
-        /* Zero only the user‑visible portion (the padding bytes need not be cleared) */
+        /* Zero only the user-visible portion (the padding bytes need not be cleared) */
         memset(obj, 0, pool->element_size);
     }
     return obj;
@@ -321,7 +315,7 @@ size_t pool_available(const object_pool *pool)
 }
 
 /*---------------------------------------------------------------*/
-/*  Diagnostic accessor – defined *after* the struct is complete   */
+/*  Diagnostic accessor: defined *after* the struct is complete   */
 size_t get_total_capacity(const object_pool *pool)
 {
     if (!pool) {

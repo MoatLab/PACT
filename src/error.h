@@ -13,13 +13,13 @@
  *   int-returning functions:
  *     0     success
  *     < 0   failure (-errno or -1 for generic)
- *     > 0   "informational success" (e.g., parse_command_line_args returns 1
+ *     > 0   "informational success" (e.g., pact_parse_command_line_args returns 1
  *           when --help was requested, to signal early exit without error)
  *
  *   pointer-returning functions:
  *     non-NULL  success
  *     NULL      failure; errno may or may not be set (most callers in PACT
- *               do NOT consult errno after a NULL — only relevant for
+ *               do NOT consult errno after a NULL: only relevant for
  *               malloc/calloc/mmap-wrapping functions, e.g., pool_alloc)
  *
  *   void-returning functions: cannot fail, OR failure is logged and
@@ -29,7 +29,7 @@
  * ALLOCATION CHECKS
  *
  *   Internal allocations on the hot path: MUST check NULL. Failure modes:
- *     - safe_malloc / safe_calloc: log + exit (fatal — use for startup only)
+ *     - safe_malloc / safe_calloc: log + exit (fatal: use for startup only)
  *     - hot-path malloc: log_warning + degrade (return NULL up the stack,
  *       or skip-and-continue with a stats counter incremented)
  *

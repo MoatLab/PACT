@@ -31,7 +31,7 @@ void (*log_info_fn)(const char *function, const char *format, ...) = log_info_im
 void (*log_debug_fn)(const char *function, const char *format, ...) = noop_log;
 void (*log_trace_fn)(const char *function, const char *format, ...) = noop_log;
 
-/* Thread-safety contract ():
+/* Thread-safety contract:
  *
  *   set_log_level() reassigns five function-pointer globals
  *   (log_error_fn / log_warning_fn / log_info_fn / log_debug_fn / log_trace_fn).
@@ -41,10 +41,11 @@ void (*log_trace_fn)(const char *function, const char *format, ...) = noop_log;
  *   startup (before pthread_create or coroutine spawn), and MUST NOT be called
  *   again once worker threads are running.
  *
- *   All current callers (parse_command_line_args during main()'s init phase)
- *   satisfy this. If runtime log-level changes are ever needed, this function
- *   needs a pthread_mutex AND atomic stores; do not just sprinkle pthread_mutex —
- *   readers (every log call on the hot path) also need acquire-loads. */
+ *   All current callers (pact_parse_command_line_args during main()'s init
+ *   phase) satisfy this. If runtime log-level changes are ever needed, this
+ *   function needs a pthread_mutex AND atomic stores. A pthread_mutex alone is
+ *   not enough: readers (every log call on the hot path) also need
+ *   acquire-loads. */
 void set_log_level(int level)
 {
     global_log_level = level;

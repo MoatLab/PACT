@@ -1,8 +1,8 @@
 #!/bin/bash
 # Take the slow-tier (second-socket) CPUs offline to emulate a CPU-less CXL
-# tier. The CPU list is machine-specific (below: the odd-socket sibling lanes
-# on the reference dual-socket SKX host) - edit it to match `lscpu`/`numactl -H`
-# for your machine. Requires root.
+# tier. The CPU list below is an example for one dual-socket Skylake-X host.
+# Edit it to match the slow-tier node of your machine (`lscpu`, `numactl -H`).
+# Requires root.
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run as root (sudo)"; exit 1; }
 

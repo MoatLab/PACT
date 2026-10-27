@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 
-/* utils.c — small stateless utility functions.
+/* utils.c: small stateless utility functions.
  * _GNU_SOURCE is supplied by the Makefile (-D_GNU_SOURCE); needed here for
  * sched_setaffinity. */
 
@@ -39,24 +39,103 @@ int pact_pin_to_cpu(int cpu)
     CPU_ZERO(&cpuset);
     CPU_SET(cpu, &cpuset);
     if (sched_setaffinity(0, sizeof(cpuset), &cpuset) < 0) {
-        log_error("pin_to_cpu", "Failed to set affinity to CPU %d: %s", cpu, strerror(errno));
+        int error = errno; /* the caller reports it */
+        log_error("pin_to_cpu", "Failed to set affinity to CPU %d: %s", cpu, strerror(error));
+        errno = error;
         return -1;
     }
     log_info("pin_to_cpu", "Pinned to CPU %d", cpu);
     return 0;
 }
 
-bool pact_check_all_targets_exited(pact_context_t *ctx)
+void pact_mark_workload_exited(pact_workload_t *wl)
 {
-    if (ctx->target_pidfd < 0) {
-        return false;
+    if (wl->exited) {
+        return;
     }
-    struct pollfd target = {.fd = ctx->target_pidfd, .events = POLLIN};
+    wl->exited = true;
+    log_info("pact_check_all_targets_exited", "Workload %d (PID %d) has exited", wl->index,
+             (int)wl->target_pid);
+}
+
+bool pact_workload_exited(pact_context_t *ctx, pact_workload_t *wl)
+{
+    if (wl->exited || wl->pidfd < 0) {
+        return wl->exited;
+    }
+    struct pollfd target = {.fd = wl->pidfd, .events = POLLIN};
     int result = poll(&target, 1, 0);
     if ((result < 0 && errno != EINTR) || (target.revents & POLLNVAL)) {
         log_error("pact_check_all_targets_exited", "Cannot query workload pidfd");
         ctx->sampling_failed = true;
         ctx->running = false;
+        return false;
     }
-    return result > 0 && (target.revents & (POLLIN | POLLHUP));
+    if (result > 0 && (target.revents & (POLLIN | POLLHUP))) {
+        pact_mark_workload_exited(wl);
+    }
+    return wl->exited;
+}
+
+bool pact_check_all_targets_exited(pact_context_t *ctx)
+{
+    if (ctx->nr_workloads <= 0) {
+        return false;
+    }
+    bool all_exited = true;
+    for (int i = 0; i < ctx->nr_workloads; i++) {
+        if (!pact_workload_exited(ctx, &ctx->workloads[i])) {
+            all_exited = false;
+        }
+    }
+    return all_exited;
+}
+
+int pact_parse_cpu_list(const char *text, uint64_t *mask)
+{
+    uint64_t cpus = 0;
+    const char *p = text;
+    if (*p == '\0') {
+        return -1;
+    }
+    while (*p) {
+        if (*p < '0' || *p > '9') {
+            return -1;
+        }
+        char *end = NULL;
+        errno = 0;
+        unsigned long first = strtoul(p, &end, 10);
+        unsigned long last = first;
+        if (errno != 0) {
+            return -1;
+        }
+        p = end;
+        if (*p == '-') {
+            p++;
+            if (*p < '0' || *p > '9') {
+                return -1;
+            }
+            last = strtoul(p, &end, 10);
+            if (errno != 0) {
+                return -1;
+            }
+            p = end;
+        }
+        if (first > last || last > 63) {
+            return -1;
+        }
+        for (unsigned long cpu = first; cpu <= last; cpu++) {
+            cpus |= 1ULL << cpu;
+        }
+        if (*p == ',') {
+            p++;
+            if (*p == '\0') {
+                return -1;
+            }
+        } else if (*p != '\0') {
+            return -1;
+        }
+    }
+    *mask = cpus;
+    return 0;
 }

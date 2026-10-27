@@ -73,7 +73,7 @@ make olddefconfig
 if grep -q "^CONFIG_INTEL_UNCORE_FREQ_CONTROL=y" .config; then
     echo "    CONFIG_INTEL_UNCORE_FREQ_CONTROL=y  confirmed."
 else
-    echo "WARNING: CONFIG_INTEL_UNCORE_FREQ_CONTROL may not be set — check .config manually."
+    echo "WARNING: CONFIG_INTEL_UNCORE_FREQ_CONTROL may not be set: check .config manually."
 fi
 
 # ---------------------------------------------------------------------------

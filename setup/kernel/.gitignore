@@ -1,0 +1,6 @@
+# Outputs of setup_kernel.sh
+/linux/
+/build.log
+*.deb
+*.buildinfo
+*.changes

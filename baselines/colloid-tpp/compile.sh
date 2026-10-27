@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build the Colloid-tpp baseline kernel: Linux v6.3 + colloid-skx.patch + colloid-skx-alto.patch.
+# Build the Colloid-tpp baseline kernel: Linux v6.3 + colloid-skx.patch +
+# colloid-skx-alto.patch + ../common/colloid-build.patch.
 # Expects a Linux git checkout at ./linux (clone it there first; not bundled).
 set -euo pipefail
 

@@ -2,11 +2,31 @@
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 
 /*
- * pact_logging.c - Optional logging implementation for PACT
+ * logging.c - Optional logging implementation for PACT
  *
  * This file contains the actual logging implementation, only compiled when
  * PACT_ENABLE_LOGGING is defined. When logging is disabled, this file is
- * not needed as pact_logging.h provides inline no-ops.
+ * not needed as logging.h provides inline no-ops.
+ *
+ * The log is CSV. Each row starts with three common columns: timestamp
+ * (TSC ticks), event_type and function (the caller). The payload columns
+ * arg1 to arg7 follow. Their number and meaning depend on event_type, and
+ * a row leaves out the columns that its event does not use:
+ *
+ *   pebs_sample      workload, page address, tier, attributed stalls
+ *   coro_event       coroutine, event, elapsed (us)
+ *   pac_calc         page address, frequency, total samples, stalls,
+ *                    attributed stalls, tier, MLP
+ *   ring_buffer      operation, ring, count, current size, capacity
+ *   workload_info    workload, PID, name, CPUs (name and CPUs quoted)
+ *   pmu_stats        workload, slow-tier MLP, slow-tier LLC misses,
+ *                    slow-tier events
+ *   pac_update       workload, page address, score, tier, bin
+ *   migration        workload, operation, page address, from tier, to tier
+ *   pebs_aggregator  workload, expected samples, processed samples, perf
+ *                    lost events, perf lost samples, events dropped with
+ *                    the aggregator full, events dropped with the update
+ *                    ring full
  */
 
 #include "logging.h"
@@ -61,11 +81,11 @@ void init_logging(pact_context_t *pact, const char *filename, const char *format
         return;
     }
 
-    /* Write header based on format */
+    /* The common columns, then the payload columns (see the top of this
+     * file). */
     if (strcmp(format, "csv") == 0) {
-        fprintf(pact->log_file, "timestamp,event_type,page_addr,pac_value,tier,bin_index\n");
-    } else if (strcmp(format, "json") == 0) {
-        fprintf(pact->log_file, "[\n");
+        fprintf(pact->log_file,
+                "timestamp,event_type,function,arg1,arg2,arg3,arg4,arg5,arg6,arg7\n");
     }
 
     fflush(pact->log_file);
@@ -73,16 +93,12 @@ void init_logging(pact_context_t *pact, const char *filename, const char *format
 
 /*
  * Cleanup logging subsystem
- * Closes log file and writes footer if needed
+ * Closes log file
  */
 void cleanup_logging(pact_context_t *pact)
 {
     if (!pact->log_file) {
         return;
-    }
-
-    if (strcmp(pact->log_format, "json") == 0) {
-        fprintf(pact->log_file, "\n]\n");
     }
 
     fclose(pact->log_file);
@@ -144,32 +160,15 @@ void log_ring_buffer_op(pact_context_t *pact, const char *function, const char *
 void log_workload_info(pact_context_t *pact, const char *function, int workload_id, pid_t pid,
                        const char *name, const char *cores)
 {
-    log_event(pact, "workload_info", function, "%d,%d,%s,%s", workload_id, pid, name, cores);
+    log_event(pact, "workload_info", function, "%d,%d,\"%s\",\"%s\"", workload_id, pid, name,
+              cores);
 }
 
-void log_migration_stats(pact_context_t *pact, const char *function, int workload_id,
-                         uint64_t new_promotions, uint64_t new_demotions,
-                         uint64_t avg_promotion_pac, uint64_t avg_demotion_pac,
-                         uint64_t repromotions_pact_pact, uint64_t repromotions_pact_other,
-                         uint64_t repromotions_other_pact, uint64_t repromotions_other_other,
-                         uint64_t redemotions_pact_pact, uint64_t redemotions_pact_other,
-                         uint64_t redemotions_other_pact, uint64_t redemotions_other_other)
+void log_pmu(pact_context_t *pact, const char *function, int workload_id, double slow_tier_mlp,
+             uint64_t llc_misses_slow, uint64_t slow_tier_events)
 {
-    log_event(pact, "migration_stats", function,
-              "%d,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu", workload_id, new_promotions,
-              new_demotions, avg_promotion_pac, avg_demotion_pac, repromotions_pact_pact,
-              repromotions_pact_other, repromotions_other_pact, repromotions_other_other,
-              redemotions_pact_pact, redemotions_pact_other, redemotions_other_pact,
-              redemotions_other_other);
-}
-
-void log_pmu(pact_context_t *pact, const char *function, int workload_id, double fast_tier_mlp,
-             double slow_tier_mlp, uint64_t llc_misses_fast, uint64_t llc_misses_slow,
-             uint64_t fast_tier_events, uint64_t slow_tier_events)
-{
-    log_event(pact, "pmu_stats", function, "%d,%.2f,%.2f,%lu,%lu,%lu,%lu", workload_id,
-              fast_tier_mlp, slow_tier_mlp, llc_misses_fast, llc_misses_slow, fast_tier_events,
-              slow_tier_events);
+    log_event(pact, "pmu_stats", function, "%d,%.2f,%lu,%lu", workload_id, slow_tier_mlp,
+              llc_misses_slow, slow_tier_events);
 }
 
 void log_pac_update(pact_context_t *pact, const char *function, int workload_id, uint64_t page_addr,

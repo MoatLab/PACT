@@ -3,10 +3,7 @@
 //
 // Uses kprobes to resolve internal kernel symbols at load time.
 // Works on vanilla Linux 6.3 with CONFIG_KPROBES=y and CONFIG_KALLSYMS_ALL=y
-// (both are default-on in standard kernel configs).
-//
-// If your kernel is built without KALLSYMS_ALL, use the patched-kernel
-// variant in kernel/tierinit/ instead.
+// (the configuration in setup/kernel/ has both).
 
 #include <linux/module.h>
 #include <linux/kernel.h>

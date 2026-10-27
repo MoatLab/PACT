@@ -13,11 +13,11 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/mmzone.h>
-#include <linux/delay.h>
 #include <linux/workqueue.h>
 
 #define LOCAL_NUMA	0
-#define CORE		8
+/* CPU that runs the reset work. Do not run workloads on this CPU. */
+#define CORE		0
 #define INTERVAL_MS	5000
 
 static void kswapd_reset_fn(struct work_struct *work);
@@ -56,8 +56,12 @@ static int __init kswapdrst_init(void)
 static void __exit kswapdrst_exit(void)
 {
 	WRITE_ONCE(terminate, 1);
-	msleep(INTERVAL_MS);
-	flush_workqueue(wq);
+	/*
+	 * Cancel the pending work and wait for a running one. The work queues
+	 * itself again, and cancel_delayed_work_sync() also stops that, so no
+	 * timer or work item of this module is left after it returns.
+	 */
+	cancel_delayed_work_sync(&reset_work);
 	destroy_workqueue(wq);
 	pr_info("kswapdrst: unloaded\n");
 }

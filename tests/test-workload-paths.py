@@ -24,7 +24,7 @@ class WorkloadPathTests(unittest.TestCase):
             directory.mkdir()
             graphs = directory / 'graph inputs'
             graphs.mkdir()
-            for binary in ('bc', 'pr', 'sssp', 'tc'):
+            for binary in ('bc', 'pr'):
                 program = directory / binary
                 program.write_text('#!/usr/bin/env python3\nimport sys,json\nprint(json.dumps({"binary": sys.argv[0].rsplit("/", 1)[-1], "args": sys.argv[1:]}))\n')
                 program.chmod(0o755)
@@ -39,7 +39,7 @@ class WorkloadPathTests(unittest.TestCase):
                         result = subprocess.check_output(['bash', '-eu', '-c', script, *extra], env=env, text=True)
                         self.assertEqual(json.loads(result), {'binary': binary, 'args': ['-f', str(graphs / graph), *options]})
 
-    def test_legacy_commands_preserve_paths(self):
+    def test_other_commands_preserve_paths(self):
         cases = {
             'bwaves_8t': ('SPEC_DIR', '603.bwaves_s/speed_bwaves_base.mytest-m64', ['bwaves_1']),
             'w_649_8t': ('SPEC_DIR', '649.fotonik3d_s/cmd.sh', []),
@@ -49,7 +49,7 @@ class WorkloadPathTests(unittest.TestCase):
             'ptr_chase': ('UBENCH_DIR', 'ptr_chase', ['5120', '10']),
             'seq_array': ('UBENCH_DIR', 'seq_array', ['5120', '10']),
         }
-        with tempfile.TemporaryDirectory(prefix='pact-legacy-paths-') as temp:
+        with tempfile.TemporaryDirectory(prefix='pact-other-paths-') as temp:
             base = Path(temp) / 'inputs space $literal;data'
             for name, (variable, relative, arguments) in cases.items():
                 with self.subTest(workload=name):

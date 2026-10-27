@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 
-/* cooling.c — cooling factor α (Algorithm 1).
+/* cooling.c: cooling factor α (Algorithm 1).
  *
  * PAC update has form pac[p] ← α · pac[p] + S_p with α ∈ [0, 1]. Default
  * α = 1.0 (pure accumulation, no cooling). When α < 1.0, cooling is
@@ -39,21 +39,25 @@ static void cool_pac_table(pact_context_t *ctx, pac_table_t *table, double alpha
             mco_yield(co);
         }
     }
-    ctx->workload->stats.cooling_decays += processed;
+    ctx->stats.cooling_decays += processed;
 }
 
+/* The trigger counts the samples applied to each PAC table and cools that
+ * table: PACT's one table counts every workload's samples. */
 void cooling_coroutine(mco_coro *co)
 {
     pact_context_t *ctx = (pact_context_t *)mco_get_user_data(co);
-    uint64_t last_trigger_count = 0;
 
     while (ctx->running) {
         /* Default α = 1.0: no cooling. Skip the table walk entirely. */
         if (ctx->cooling_alpha < 1.0) {
-            uint64_t current = ctx->sample_counts;
-            if (current - last_trigger_count >= ctx->cooling_trigger_samples) {
-                cool_pac_table(ctx, ctx->workload->pac_table, ctx->cooling_alpha, co);
-                last_trigger_count = current;
+            for (int d = 0; d < ctx->nr_domains && ctx->running; d++) {
+                pac_domain_t *domain = &ctx->domains[d];
+                uint64_t current = domain->samples;
+                if (current - domain->cooling_last_trigger >= ctx->cooling_trigger_samples) {
+                    cool_pac_table(ctx, domain->table, ctx->cooling_alpha, co);
+                    domain->cooling_last_trigger = current;
+                }
             }
         }
         mco_yield(co);

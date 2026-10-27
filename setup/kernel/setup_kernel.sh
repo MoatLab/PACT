@@ -1,225 +1,242 @@
 #!/bin/bash
-# Build script for the PACT Linux 6.3 kernel.
+# Build the kernel for PACT and Tierce: Linux v6.3 with tierce-v6.3.patch,
+# packaged as Debian packages. README.md describes what the patch adds and
+# how to install the packages and set up GRUB.
 #
-# Unlike the 5.15 flow, 6.3 needs NO kernel patch: the PACT tiering hooks are
-# provided by the out-of-tree modules in this folder (tierinit/, kswapdrst/),
-# which resolve internal symbols via kprobes at load time. This script just
-# builds a *vanilla* Linux 6.3 with the config options those modules and the
-# uncore-frequency control require.
+# Usage:
+#   ./setup_kernel.sh
+#
+# Optional environment variables:
+#   KERNEL_DIR          Linux git tree. If it does not exist, the script
+#                       clones tag v6.3 into it. Default: ./linux next to
+#                       this script.
+#   KERNEL_CONFIG       Base .config. Default: config-6.3.0-tierce next to
+#                       this script.
+#   KERNEL_LOCALVERSION Kernel release suffix. Default: -tierce (release
+#                       6.3.0-tierce), or -tierce-baselines (release
+#                       6.3.0-tierce-baselines) with KERNEL_BASELINES=1, so
+#                       that uname -r tells the two builds apart.
+#   KERNEL_PKGVERSION   Debian package version. Default: 1.
+#   KERNEL_BASELINES    1: also apply baselines-v6.3.patch after
+#                       tierce-v6.3.patch, so that the same kernel can run
+#                       the NUMA-balancing and Colloid baselines (see
+#                       README.md). Default: 0 (tierce-v6.3.patch only).
+#   JOBS                Parallel make jobs. Default: nproc.
+#
+# Output: the linux-image and linux-headers packages and build.log, in the
+# parent directory of KERNEL_DIR. The script installs nothing.
+set -euo pipefail
+set -o errtrace
 
-set -e
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-KERNEL_DIR="$SCRIPT_DIR/linux"
-# Optional: drop a kernel.config next to this script to use it as the base.
-BASE_CONFIG="$SCRIPT_DIR/kernel.config"
-
-# ---------------------------------------------------------------------------
-# 1. Clone vanilla Linux v6.3
-# ---------------------------------------------------------------------------
-echo "==> Fetching Linux v6.3 source..."
-if [ ! -d "$KERNEL_DIR/.git" ]; then
-    git clone --depth=1 --branch v6.3 \
-        https://github.com/torvalds/linux.git "$KERNEL_DIR"
+KERNEL_DIR="${KERNEL_DIR:-$SCRIPT_DIR/linux}"
+KERNEL_CONFIG="${KERNEL_CONFIG:-$SCRIPT_DIR/config-6.3.0-tierce}"
+KERNEL_BASELINES="${KERNEL_BASELINES:-0}"
+if [[ "$KERNEL_BASELINES" == "1" ]]; then
+    KERNEL_LOCALVERSION="${KERNEL_LOCALVERSION:--tierce-baselines}"
 else
-    echo "    Repo already exists, skipping clone."
+    KERNEL_LOCALVERSION="${KERNEL_LOCALVERSION:--tierce}"
 fi
+KERNEL_PKGVERSION="${KERNEL_PKGVERSION:-1}"
+JOBS="${JOBS:-$(nproc)}"
+PATCH="$SCRIPT_DIR/tierce-v6.3.patch"
+ADDON="$SCRIPT_DIR/baselines-v6.3.patch"
+LINUX_URL="https://github.com/torvalds/linux.git"
+TAG="v6.3"
 
+die()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+[[ -d "$(dirname "$KERNEL_DIR")" ]] ||
+    die "parent directory of KERNEL_DIR does not exist: $KERNEL_DIR"
+OUT_DIR="$(cd "$(dirname "$KERNEL_DIR")" && pwd)"
+LOGF="$OUT_DIR/build.log"
+
+on_error()
+{
+    echo "ERROR: command failed at line $1. Last lines of $LOGF:" >&2
+    tail -n 20 "$LOGF" >&2
+}
+trap 'on_error $LINENO' ERR
+
+# Fail if .config does not contain the exact line given.
+require_config()
+{
+    grep -qx -- "$1" .config || die ".config lacks '$1' after olddefconfig"
+}
+
+[[ -f "$PATCH" ]] || die "patch not found: $PATCH"
+[[ "$KERNEL_BASELINES" == "0" || "$KERNEL_BASELINES" == "1" ]] ||
+    die "KERNEL_BASELINES must be 0 or 1: $KERNEL_BASELINES"
+PATCHES=("$PATCH")
+if [[ "$KERNEL_BASELINES" == "1" ]]; then
+    [[ -f "$ADDON" ]] || die "add-on patch not found: $ADDON"
+    PATCHES+=("$ADDON")
+fi
+[[ -f "$KERNEL_CONFIG" ]] || die "config not found: $KERNEL_CONFIG"
+KERNEL_CONFIG="$(cd "$(dirname "$KERNEL_CONFIG")" && pwd)/$(basename "$KERNEL_CONFIG")"
+[[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer: $JOBS"
+for tool in git make gcc flex bison bc perl rsync cpio fakeroot dpkg-buildpackage; do
+    command -v "$tool" >/dev/null || die "missing build tool: $tool (see README.md)"
+done
+: > "$LOGF"
+
+# ---------------------------------------------------------------------------
+# 1. Linux v6.3 source
+# ---------------------------------------------------------------------------
+if [[ ! -e "$KERNEL_DIR" ]]; then
+    echo "==> Cloning Linux $TAG into $KERNEL_DIR ..."
+    git clone --depth 1 --branch "$TAG" "$LINUX_URL" "$KERNEL_DIR"
+elif [[ ! -e "$KERNEL_DIR/.git" ]]; then
+    die "$KERNEL_DIR exists but is not a git checkout"
+fi
+KERNEL_DIR="$(cd "$KERNEL_DIR" && pwd)"
 cd "$KERNEL_DIR"
 
-# The shallow clone above (--branch v6.3) already fetched the v6.3 tag and left
-# HEAD detached at it, so no extra fetch/checkout is needed. We only re-checkout
-# defensively when an existing repo was reused and isn't already on v6.3.
-echo "==> Ensuring v6.3 is checked out..."
-if [ "$(git describe --tags --exact-match 2>/dev/null)" != "v6.3" ]; then
-    git checkout v6.3
-else
-    echo "    Already at v6.3."
-fi
-
-# ---------------------------------------------------------------------------
-# 2. Base kernel configuration
-# ---------------------------------------------------------------------------
-if [ -f "$BASE_CONFIG" ]; then
-    echo "==> Using provided base config: $BASE_CONFIG"
-    cp "$BASE_CONFIG" .config
-elif [ -f "/boot/config-$(uname -r)" ]; then
-    echo "==> Basing config on the running kernel (/boot/config-$(uname -r))..."
-    cp "/boot/config-$(uname -r)" .config
-else
-    echo "==> No base config found; using 'make defconfig'..."
-    make defconfig
-fi
-
-echo "==> Running make olddefconfig to resolve symbols for 6.3..."
-make olddefconfig
-
-# Trim the module set to what's actually loaded on this machine. A distro base
-# config enables ~6000 modules; building+BTF-processing all of them takes ~45
-# min. localmodconfig keeps only modules currently loaded (lsmod), cutting the
-# build to ~5-10 min. Set PACT_FULL_MODULES=1 to skip this and build everything.
-# (The force-enable block below re-adds boot-critical drivers afterward, so the
-# trim can't drop the root-disk/NIC drivers.)
-if [ "${PACT_FULL_MODULES:-0}" != "1" ]; then
-    echo "==> Trimming modules with localmodconfig (set PACT_FULL_MODULES=1 to skip)..."
-    yes "" | make LSMOD=/proc/modules localmodconfig || \
-        echo "    (localmodconfig failed/skipped; continuing with full config)"
-fi
-
-# Skip BTF debug-info generation for modules — it is the single slowest part of
-# the build (per-module BTF for the whole tree) and PACT does not need it.
-./scripts/config --disable CONFIG_DEBUG_INFO_BTF
-./scripts/config --disable CONFIG_DEBUG_INFO_BTF_MODULES
-
-# ---------------------------------------------------------------------------
-# 3. Enable the options PACT needs
-#    - INTEL_UNCORE_FREQ_CONTROL : uncore freq sysfs (used by modify-uncore-freq.sh)
-#    - KPROBES + KALLSYMS_ALL     : required by the tierinit module to
-#                                   resolve static mm/memory-tiers symbols at load
-#    - MODULES + MODULE_UNLOAD    : load (insmod) and unload (rmmod) the .ko modules
-#    (CONFIG_NUMA / CONFIG_MIGRATION are inherited from the base config — MIGRATION
-#     is def_bool y whenever NUMA/COMPACTION is on, so there is no need to set them.)
-# ---------------------------------------------------------------------------
-echo "==> Enabling required kernel options..."
-./scripts/config --enable CONFIG_INTEL_UNCORE_FREQ_CONTROL
-./scripts/config --enable CONFIG_KPROBES
-./scripts/config --enable CONFIG_KALLSYMS_ALL
-./scripts/config --enable CONFIG_MODULES
-./scripts/config --enable CONFIG_MODULE_UNLOAD
-
-# Clear distro signing-key paths. A distro base config (e.g. Ubuntu's
-# /boot/config) sets CONFIG_SYSTEM_TRUSTED_KEYS / CONFIG_SYSTEM_REVOCATION_KEYS
-# to Canonical cert files (debian/canonical-*.pem) that do not exist in the
-# vanilla torvalds tree, so the 'certs' build step fails with
-# "make[1]: *** [certs] Error 2". Blank them and disable module signing so a
-# vanilla build succeeds and our out-of-tree modules load without a signature.
-echo "==> Clearing distro signing keys (avoid certs build failure)..."
-./scripts/config --set-str CONFIG_SYSTEM_TRUSTED_KEYS ""
-./scripts/config --set-str CONFIG_SYSTEM_REVOCATION_KEYS ""
-./scripts/config --disable CONFIG_MODULE_SIG
-./scripts/config --disable CONFIG_MODULE_SIG_ALL
-
-# WORKAROUND: Linux 6.3.0 has a known page-fault bug in module_sig_check
-# when loading compressed modules without a signature via finit_module().
-echo "==> Disabling module compression to avoid 6.3.0 page fault bug..."
-./scripts/config --disable CONFIG_MODULE_COMPRESS
-./scripts/config --disable CONFIG_MODULE_COMPRESS_ZSTD
-./scripts/config --disable CONFIG_MODULE_DECOMPRESS
-
-# Boot-critical drivers MUST be built-in (=y), not modules (=m). On a typical
-# stock distro/CloudLab config the root-disk and NIC drivers ship as modules;
-# a freshly built kernel can then fail to boot because those modules are not in
-# the initramfs (no root disk, no network). Force the storage + NIC drivers
-# this class of machine needs into the kernel image.
-#
-# IMPORTANT: a SATA root disk (e.g. /dev/sda on CloudLab c220g5) presents as a
-# SCSI "sd" device, so the SCSI disk stack (SCSI, BLK_DEV_SD) and the SATA host
-# controllers (SATA_AHCI, ATA_PIIX) must ALL be built-in — enabling SATA_AHCI
-# alone is not enough and the kernel drops to an initramfs shell with
-# "Gave up waiting for root file system device". NVMe is included for nodes
-# whose root is NVMe. Extras are harmless if absent.
-echo "==> Forcing boot-critical storage + NIC drivers built-in..."
-for opt in \
-        SCSI SCSI_MOD BLK_DEV_SD \
-        ATA SATA_AHCI ATA_PIIX SATA_MOBILE_LPM_POLICY \
-        BLK_DEV_NVME NVME_CORE \
-        SCSI_MPT3SAS \
-        EXT4_FS \
-        IXGBE I40E ICE IGB E1000E MLX5_CORE; do
-    ./scripts/config --enable "CONFIG_${opt}"
-done
-
-# Pin the kernel release string to a plain "6.3.0". Two things can pollute
-# it: LOCALVERSION_AUTO appends "-dirty" (via `git describe`) whenever the
-# source tree has any uncommitted change, so out-of-tree modules build with
-# vermagic "6.3.0-dirty" and the kernel REFUSES to load them ("vermagic
-# mismatch"); and a base config taken from the running kernel carries that
-# kernel's CONFIG_LOCALVERSION suffix into the new build, yielding a
-# misleading release string. Disable the former and clear the latter.
-./scripts/config --disable CONFIG_LOCALVERSION_AUTO
-./scripts/config --set-str CONFIG_LOCALVERSION ""
-# Pull in any dependencies the above may require
-make olddefconfig
-
-for opt in CONFIG_INTEL_UNCORE_FREQ_CONTROL CONFIG_KPROBES CONFIG_KALLSYMS_ALL \
-           CONFIG_MODULES CONFIG_MODULE_UNLOAD; do
-    if grep -q "^${opt}=y" .config; then
-        echo "    ${opt}=y  confirmed."
+if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+    echo "==> Fetching tag $TAG ..."
+    if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+        git fetch --depth 1 "$LINUX_URL" "refs/tags/$TAG:refs/tags/$TAG"
     else
-        echo "WARNING: ${opt} may not be set — check .config manually."
+        git fetch "$LINUX_URL" "refs/tags/$TAG:refs/tags/$TAG"
     fi
-done
+fi
+TAG_COMMIT="$(git rev-parse "$TAG^{commit}")"
 
 # ---------------------------------------------------------------------------
-# 4. Build
+# 2. Apply the patches (skipped if the tree already holds exactly them)
 # ---------------------------------------------------------------------------
-NPROC=$(nproc)
-echo "==> Building kernel with $NPROC parallel jobs..."
-echo "    (this will take several minutes)"
-make -j"$NPROC"
+# True if HEAD is the tag, the files that the patches touch equal the tag
+# with the patches applied in order, and no other tracked file is modified.
+# The expected files are built in a temporary index, because "git apply
+# --check" tests each patch against the tree as it is, not after the patch
+# before it.
+tree_has_patches()
+{
+    local idx p touched others
+    [[ "$(git rev-parse HEAD)" == "$TAG_COMMIT" ]] || return 1
+    idx="$(mktemp)"
+    if ! GIT_INDEX_FILE="$idx" git read-tree "$TAG"; then
+        rm -f "$idx"
+        return 1
+    fi
+    for p in "${PATCHES[@]}"; do
+        if ! GIT_INDEX_FILE="$idx" git apply --cached "$p" 2>/dev/null; then
+            rm -f "$idx"
+            return 1
+        fi
+    done
+    mapfile -t touched < <(for p in "${PATCHES[@]}"; do
+        git apply --numstat "$p"; done | awk '{print $3}' | sort -u)
+    if ! GIT_INDEX_FILE="$idx" git diff --quiet -- "${touched[@]}"; then
+        rm -f "$idx"
+        return 1
+    fi
+    rm -f "$idx"
+    others="$(git status --porcelain --untracked-files=no | awk '{print $2}' |
+        grep -vxF -f <(printf '%s\n' "${touched[@]}") || true)"
+    [[ -z "$others" ]]
+}
+
+if tree_has_patches; then
+    echo "==> Already applied, skipping: ${PATCHES[*]##*/}"
+else
+    [[ -z "$(git status --porcelain --untracked-files=no)" ]] ||
+        die "$KERNEL_DIR has local changes (for example the patches of a build with another KERNEL_BASELINES value); reset it to $TAG first (git reset --hard $TAG; git clean -f mm/vmscan.h)"
+    # The core patch adds mm/vmscan.h. A reset to the tag keeps that
+    # untracked file, and git apply then stops on it. A HEAD that tracks the
+    # file is fine: the checkout of the tag removes it.
+    if [[ -e mm/vmscan.h ]] && ! git ls-files --error-unmatch mm/vmscan.h >/dev/null 2>&1; then
+        die "$KERNEL_DIR/mm/vmscan.h is left from an earlier apply of the patches; remove it (git clean -f mm/vmscan.h) and run the script again"
+    fi
+    git checkout --quiet --detach "$TAG"
+    for p in "${PATCHES[@]}"; do
+        echo "==> Applying $(basename "$p") ..."
+        git apply --check "$p"
+        git apply "$p"
+    done
+fi
 
 # ---------------------------------------------------------------------------
-# 5. Done
+# 3. Configuration
 # ---------------------------------------------------------------------------
-echo ""
-echo "==> Build complete."
-echo ""
-echo "    Kernel image  : $KERNEL_DIR/arch/x86/boot/bzImage"
-echo "    Kernel version: $(make kernelrelease 2>/dev/null)"
-echo ""
-echo "    To install (requires root):"
+echo "==> Configuring from $KERNEL_CONFIG ..."
+cp -f "$KERNEL_CONFIG" .config
+# Options that the patch, the modules and ../env need. The default config
+# already has all of them. They matter when KERNEL_CONFIG points to another
+# config. CONFIG_LRU_GEN must stay off: the per-cgroup demotion thread scans
+# the classic active/inactive LRU lists. Module compression stays off because
+# Linux 6.3.0 can fault when it loads a compressed module without a signature.
+./scripts/config --file .config \
+    --enable MMCTL \
+    --disable LRU_GEN \
+    --enable NUMA_BALANCING \
+    --enable MEMCG \
+    --enable X86_CPU_RESCTRL \
+    --enable KPROBES \
+    --enable KALLSYMS_ALL \
+    --enable INTEL_UNCORE_FREQ_CONTROL \
+    --enable MODULES \
+    --enable MODULE_UNLOAD \
+    --disable MODULE_SIG \
+    --enable MODULE_COMPRESS_NONE \
+    --disable MODULE_COMPRESS_GZIP \
+    --disable MODULE_COMPRESS_XZ \
+    --disable MODULE_COMPRESS_ZSTD \
+    --set-str SYSTEM_TRUSTED_KEYS "" \
+    --set-str SYSTEM_REVOCATION_KEYS "" \
+    --disable LOCALVERSION_AUTO \
+    --set-str LOCALVERSION ""
+make olddefconfig >> "$LOGF" 2>&1
 
-echo "      sudo make -C $KERNEL_DIR modules"
-sudo make -C "$KERNEL_DIR" modules
+require_config 'CONFIG_MMCTL=y'
+require_config '# CONFIG_LRU_GEN is not set'
+require_config 'CONFIG_NUMA_BALANCING=y'
+require_config 'CONFIG_MEMCG=y'
+require_config 'CONFIG_MIGRATION=y'
+require_config 'CONFIG_X86_CPU_RESCTRL=y'
+require_config 'CONFIG_KPROBES=y'
+require_config 'CONFIG_KALLSYMS_ALL=y'
+require_config 'CONFIG_INTEL_UNCORE_FREQ_CONTROL=y'
+require_config 'CONFIG_MODULE_UNLOAD=y'
+require_config 'CONFIG_MODULE_COMPRESS_NONE=y'
 
-echo "      sudo make -C $KERNEL_DIR modules_install"
-sudo make -C "$KERNEL_DIR" modules_install
-
-echo "      sudo make -C $KERNEL_DIR install"
-sudo make -C "$KERNEL_DIR" install
+KREL_EXPECTED="6.3.0${KERNEL_LOCALVERSION}"
+KREL="$(make -s kernelrelease LOCALVERSION="$KERNEL_LOCALVERSION")"
+[[ "$KREL" == "$KREL_EXPECTED" ]] ||
+    die "kernel release is '$KREL', expected '$KREL_EXPECTED'"
 
 # ---------------------------------------------------------------------------
-# 6. GRUB: test the new kernel SAFELY with a one-shot boot.
-#
-# `make install` runs update-grub, which makes the newest kernel (6.3) the
-# DEFAULT boot entry. On a remote/headless machine that is dangerous: if 6.3
-# fails to boot (e.g. a missing built-in driver -> initramfs shell), EVERY
-# subsequent reboot lands in the broken kernel. So we keep the current,
-# known-good kernel as the persistent default and boot 6.3 exactly ONCE via
-# grub-reboot. If that boot fails, the next reboot automatically falls back to
-# the known-good kernel.
+# 4. Build the Debian packages
 # ---------------------------------------------------------------------------
-RUNNING_KVER="$(uname -r)"
-NEW_KVER="$(make -s kernelrelease 2>/dev/null || echo 6.3.0)"
-echo ""
-echo "==> Configuring GRUB for a SAFE one-shot test of ${NEW_KVER}..."
-sudo sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
-sudo update-grub >/dev/null 2>&1
-# Persistent default stays on the currently-running (known-good) kernel:
-sudo grub-set-default "Advanced options for Ubuntu>Ubuntu, with Linux ${RUNNING_KVER}" 2>/dev/null || true
-# Arm a ONE-SHOT boot of the new kernel for the next reboot only:
-sudo grub-reboot "Advanced options for Ubuntu>Ubuntu, with Linux ${NEW_KVER}"
+echo "==> Building $KREL packages with $JOBS jobs (log: $LOGF) ..."
+make -j"$JOBS" bindeb-pkg \
+    LOCALVERSION="$KERNEL_LOCALVERSION" \
+    KDEB_PKGVERSION="$KERNEL_PKGVERSION" >> "$LOGF" 2>&1
+
+IMAGE_DEB="$OUT_DIR/linux-image-${KREL}_${KERNEL_PKGVERSION}_amd64.deb"
+HEADERS_DEB="$OUT_DIR/linux-headers-${KREL}_${KERNEL_PKGVERSION}_amd64.deb"
+[[ -f "$IMAGE_DEB" ]] || die "package not found: $IMAGE_DEB"
+[[ -f "$HEADERS_DEB" ]] || die "package not found: $HEADERS_DEB"
 
 cat <<EOF
 
-==> Build + install complete. The new kernel (${NEW_KVER}) is armed for a
-    ONE-SHOT boot; the persistent default remains ${RUNNING_KVER}.
+==> Build complete: kernel release $KREL
+    Patches: ${PATCHES[*]##*/}
+    $IMAGE_DEB
+    $HEADERS_DEB
 
-    Next steps:
-      1. (Recommended) keep a serial console open in case the boot fails
-         (on CloudLab: open the node's serial console from the portal,
-         or "ssh -p 26 <node>" to the console server)
-      2. Reboot to test the new kernel once:
-             sudo reboot
-      3. After it comes back, confirm you are on the new kernel:
-             uname -r        # expect ${NEW_KVER}
-         If the node dropped to an initramfs shell instead, the one-shot has
-         already expired, so just reboot again to return to ${RUNNING_KVER}
-         and fix the kernel config.
-      4. Only once ${NEW_KVER} boots cleanly, make it the default if you want:
-             sudo grub-set-default "Advanced options for Ubuntu>Ubuntu, with Linux ${NEW_KVER}"
-             sudo update-grub
+Next steps (details in README.md):
+  1. sudo dpkg -i $IMAGE_DEB $HEADERS_DEB
+  2. In /etc/default/grub, make $KREL the default kernel and add these
+     boot arguments to GRUB_CMDLINE_LINUX:
+       rdt=cmt,mbmtotal,mbmlocal,l3cat systemd.unified_cgroup_hierarchy=yes mitigations=off
+     Then run 'sudo update-grub' and reboot.
+  3. After the reboot, check that 'uname -r' shows $KREL. Then build and
+     load the modules: ./build_modules.sh, then
+     'sudo insmod tierinit/tierinit.ko' and
+     'sudo insmod kswapdrst/kswapdrst.ko'.
 EOF

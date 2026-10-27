@@ -33,6 +33,14 @@ int numa_move_pages(int pid, unsigned long count, void **pages, const int *nodes
 {
     /* Exercise real queue dispatch and result handling without moving pages. */
     assert(dispatch_enabled);
+    if (!nodes) {
+        /* The node query before each call: every queued page is on node 1. */
+        assert(pid == getpid() && count > 0 && count <= 2 && flags == 0);
+        for (unsigned long i = 0; i < count; i++) {
+            status[i] = 1;
+        }
+        return 0;
+    }
     assert(pid == getpid() && count > 0 && count <= 2 && flags == MPOL_MF_MOVE);
     int failures = 0;
     for (unsigned long i = 0; i < count; i++) {
@@ -52,8 +60,14 @@ int main(void)
     alarm(10);
     for (int i = 0; i < 100; i++) {
         pact_workload_t wl = {.target_pid = getpid()};
-        pact_context_t ctx = {
-            .workload = &wl, .migration_cpu = -1, .max_migrations_per_cycle = 1, .tsc_freq_hz = 1};
+        pac_domain_t domain = {0};
+        pact_context_t ctx = {.workloads = &wl,
+                              .nr_workloads = 1,
+                              .domains = &domain,
+                              .nr_domains = 1,
+                              .migration_cpu = -1,
+                              .max_migrations_per_cycle = 1,
+                              .tsc_freq_hz = 1};
         atomic_init(&ctx.migration_thread_running, false);
         atomic_store(&entered, false);
         assert(init_migration_thread(&ctx) == 0);
@@ -62,23 +76,30 @@ int main(void)
         }
         cleanup_migration_thread(&ctx);
         assert(!atomic_load(&ctx.migration_thread_running));
-        assert(wl.migration_ring == NULL);
+        assert(domain.migration_ring == NULL);
     }
     dispatch_enabled = true;
     for (int i = 0; i < 100; i++) {
         pact_workload_t wl = {.target_pid = getpid()};
-        pact_context_t ctx = {
-            .workload = &wl, .migration_cpu = -1, .max_migrations_per_cycle = 2, .tsc_freq_hz = 1};
+        pac_domain_t domain = {0};
+        pact_context_t ctx = {.workloads = &wl,
+                              .nr_workloads = 1,
+                              .domains = &domain,
+                              .nr_domains = 1,
+                              .migration_cpu = -1,
+                              .max_migrations_per_cycle = 2,
+                              .tsc_freq_hz = 1};
         pac_metadata_t metadata[4] = {0};
         atomic_init(&ctx.migration_thread_running, false);
         atomic_store(&processed, 0);
         assert(init_migration_thread(&ctx) == 0);
         for (int page = 0; page < 4; page++) {
             metadata[page].page_addr = (page + 1) * PAGE_SIZE;
+            metadata[page].pid = getpid();
             metadata[page].tier = 1;
             metadata[page].migrating = true;
             migration_entry_t entry = {.meta = &metadata[page], .target_node = 0};
-            assert(ring_buffer_migration_entry_push(wl.migration_ring, entry));
+            assert(ring_buffer_migration_entry_push(domain.migration_ring, entry));
             wake_migration_worker(&ctx);
         }
         while (atomic_load(&processed) < 4) {
@@ -87,7 +108,7 @@ int main(void)
         /* Join before reading metadata: result handling follows dispatch. */
         cleanup_migration_thread(&ctx);
         assert(!atomic_load(&ctx.migration_thread_running));
-        assert(wl.migration_ring == NULL);
+        assert(domain.migration_ring == NULL);
         assert(wl.stats.promotion_successes == 2 && wl.stats.promotion_failures == 2);
         for (int page = 0; page < 4; page++) {
             assert(!metadata[page].migrating);

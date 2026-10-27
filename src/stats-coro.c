@@ -1,13 +1,14 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
 
-/* stats-coro.c — periodic stats coroutine.
+/* stats-coro.c: periodic stats coroutine.
  *
- *
- * Yields control every `stats_interval_ms` to update derived metrics +
- * call print_stats. Uses minicoro coroutines.
+ * Runs every `stats_interval_ms`: logs the event and migration rates, a
+ * summary line per workload and the PAC telemetry at INFO level (print_stats
+ * runs at exit only). Uses minicoro coroutines.
  */
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -21,28 +22,67 @@
 
 static uint32_t total_hash_entries(pact_context_t *ctx)
 {
-    return kh_size(ctx->workload->pac_table);
+    uint32_t entries = 0;
+    for (int d = 0; d < ctx->nr_domains; d++) {
+        entries += kh_size(ctx->domains[d].table);
+    }
+    return entries;
 }
 
+/* One line per workload; hash, mig_ring, Q1, Q3 and bw describe the PAC
+ * table that holds the workload's pages (PACT: the shared table; Tierce:
+ * the workload's own table, with its bar). */
 static void log_workload_summary(pact_context_t *ctx)
 {
-    pact_workload_t *wl = ctx->workload;
-    log_info("stats_coroutine", "  WL (%s): hash=%u, Q1=%.1f, Q3=%.1f, bw=%.1f, pebs_samples=%lu",
-             wl->name, kh_size(wl->pac_table), wl->binning->q1, wl->binning->q3,
-             wl->binning->bin_width, wl->total_pebs_samples);
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        pact_workload_t *wl = &ctx->workloads[w];
+        pac_domain_t *domain = &ctx->domains[wl->domain];
+        binning_state_t *bin = domain->binning;
+        size_t ring =
+            domain->migration_ring ? ring_buffer_migration_entry_size(domain->migration_ring) : 0;
+        if (ctx->mode == PACT_MODE_TIERCE) {
+            log_info("stats_coroutine",
+                     "  WL%d (%s): hash=%u, mig_ring=%zu, bar=%.1f, ring_full_drops=%lu, "
+                     "pebs_samples=%lu, no_bar_epochs=%lu",
+                     w, wl->name, kh_size(domain->table), ring, domain->bar,
+                     domain->ring_full_drops, wl->total_pebs_samples, domain->no_bar_epochs);
+            continue;
+        }
+        log_info("stats_coroutine",
+                 "  WL%d (%s): hash=%u, mig_ring=%zu, Q1=%.1f, Q3=%.1f, bw=%.1f, "
+                 "pebs_samples=%lu, ring_full_drops=%lu",
+                 w, wl->name, kh_size(domain->table), ring, bin ? bin->q1 : 0.0,
+                 bin ? bin->q3 : 0.0, bin ? bin->bin_width : 0.0, wl->total_pebs_samples,
+                 domain->ring_full_drops);
+    }
 }
 
-/* PAC histogram for the workload: min/avg/max + per-tier averages + count
- * over threshold. Samples up to ~10K entries from large tables. */
-static void log_one_workload_pac_dist(pact_workload_t *wl)
+/* A page meets the table's admission threshold: PACT's top-bin test, or
+ * Tierce's bar. */
+static bool meets_threshold(const pac_domain_t *domain, uint64_t pv)
 {
-    pac_table_t *table = wl->pac_table;
+    const binning_state_t *bin = domain->binning;
+    if (!bin) {
+        return (double)pv >= domain->bar;
+    }
+    /* Match the runtime's bin-index decision, including fractional widths. */
+    return !(bin->bin_width > 0) || (double)pv / bin->bin_width >= (double)(bin->bin_count - 1);
+}
+
+/* PAC histogram for one PAC table: min/avg/max + per-tier averages + count
+ * over threshold. Samples up to ~10K entries from large tables. */
+static void log_one_domain_pac_dist(pac_domain_t *domain, const char *label)
+{
+    pac_table_t *table = domain->table;
     uint32_t table_size = kh_size(table);
     if (table_size == 0) {
         return;
     }
 
-    double threshold = wl->binning->bin_width * (wl->binning->bin_count - 1);
+    binning_state_t *bin = domain->binning;
+    /* Keep the displayed threshold floating-point: accepted widths may
+     * produce a threshold beyond uint64_t without admitting any page. */
+    double threshold = bin ? bin->bin_width * (bin->bin_count - 1) : domain->bar;
     uint64_t pac_min = UINT64_MAX, pac_max = 0;
     /* Up to uint32_t entries contribute uint64_t scores. Keep the sum wide
      * so the reported average remains between the sampled minimum/maximum. */
@@ -79,11 +119,7 @@ static void log_one_workload_pac_dist(pact_workload_t *wl)
             n_slow++;
             pac_slow_sum += pv;
         }
-        /* Match the runtime's bin-index decision, including fractional widths.
-         * Keep the displayed threshold floating-point: accepted widths may
-         * produce a threshold beyond uint64_t without admitting any page. */
-        if (!(wl->binning->bin_width > 0) ||
-            (double)pv / wl->binning->bin_width >= (double)(wl->binning->bin_count - 1)) {
+        if (meets_threshold(domain, pv)) {
             n_above_threshold++;
         }
     }
@@ -92,29 +128,70 @@ static void log_one_workload_pac_dist(pact_workload_t *wl)
         return;
     }
     log_info("stats_coroutine",
-             "  WL PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%.17g above_thresh=%u "
+             "  %s PAC_DIST: n=%u min=%lu avg=%lu max=%lu threshold=%.17g above_thresh=%u "
              "fast(n=%u avg=%lu) slow(n=%u avg=%lu)",
-             n_total, pac_min, (uint64_t)(pac_sum / n_total), pac_max, threshold, n_above_threshold,
-             n_fast, n_fast > 0 ? (uint64_t)(pac_fast_sum / n_fast) : 0, n_slow,
+             label, n_total, pac_min, (uint64_t)(pac_sum / n_total), pac_max, threshold,
+             n_above_threshold, n_fast, n_fast > 0 ? (uint64_t)(pac_fast_sum / n_fast) : 0, n_slow,
              n_slow > 0 ? (uint64_t)(pac_slow_sum / n_slow) : 0);
 }
 
+/* PACT scores every sample with one global scalar: the LLC misses of every
+ * workload over the global MLP. */
 static void log_pac_telemetry(pact_context_t *ctx)
 {
-    pact_workload_t *wl = ctx->workload;
+    if (ctx->mode == PACT_MODE_TIERCE) {
+        /* Tierce scores each workload's samples with its own scalar. */
+        for (int w = 0; w < ctx->nr_workloads; w++) {
+            pact_workload_t *wl = &ctx->workloads[w];
+            char label[16];
+            snprintf(label, sizeof(label), "WL%d", w);
+            log_info("stats_coroutine",
+                     "  %s PAC_INPUTS: llc_slow=%lu mlp_slow=%.2f k_cxl=%lu pebs_period=%lu", label,
+                     wl->stats.llc_misses_slow, wl->mlp, ctx->k_constant_cxl,
+                     ctx->pebs_sampling_period);
+            if (ctx->use_ldlat) {
+                /* Under LDLAT-Dyn the governor's gate is the gate in use; its
+                 * open mode keeps every sample above the hardware floor. */
+                uint32_t gate = ctx->ldlat_gate;
+                if (ctx->ldlat_dyn.enabled) {
+                    gate = ctx->ldlat_dyn.gate ? ctx->ldlat_dyn.gate : LDLAT_HW_THRESHOLD;
+                }
+                log_info("stats_coroutine",
+                         "  %s LDLAT: k_slow=%.1f gate=%u not_remote=%lu below_gate=%lu", label,
+                         wl->k_slow, gate, wl->ldlat_filtered, wl->ldlat_gated);
+            }
+            log_one_domain_pac_dist(&ctx->domains[wl->domain], label);
+        }
+        return;
+    }
+    uint64_t llc_misses = 0;
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        llc_misses += ctx->workloads[w].stats.llc_misses_slow;
+    }
     log_info("stats_coroutine",
-             "  WL PAC_INPUTS: llc_fast=%lu llc_slow=%lu mlp_fast=%.2f mlp_slow=%.2f "
-             "k_dram=%lu k_cxl=%lu pebs_period=%u",
-             wl->stats.llc_misses_fast, wl->stats.llc_misses_slow, wl->workload_mlp_fast,
-             wl->workload_mlp_slow, ctx->k_constant_dram, ctx->k_constant_cxl,
-             ctx->pebs_sampling_period);
-    log_one_workload_pac_dist(wl);
+             "  WL PAC_INPUTS: llc_slow=%lu mlp_slow=%.2f k_cxl=%lu pebs_period=%lu", llc_misses,
+             ctx->global_mlp, ctx->k_constant_cxl, ctx->pebs_sampling_period);
+    log_one_domain_pac_dist(&ctx->domains[0], "WL");
+}
+
+/* Run-wide rates sum the per-workload counters. */
+static void sum_workload_counters(pact_context_t *ctx, uint64_t *events, uint64_t *promotions,
+                                  uint64_t *demotions)
+{
+    *events = *promotions = *demotions = 0;
+    for (int w = 0; w < ctx->nr_workloads; w++) {
+        pact_stats_t *st = &ctx->workloads[w].stats;
+        *events += st->pebs_events_processed;
+        *promotions += st->promotion_successes;
+        *demotions += atomic_load_explicit(&st->demotion_successes, memory_order_relaxed);
+    }
 }
 
 void stats_coroutine(mco_coro *co)
 {
     pact_context_t *ctx = (pact_context_t *)mco_get_user_data(co);
-    pact_stats_t last_stats = ctx->workload->stats;
+    uint64_t last_events, last_promotions, last_demotions;
+    sum_workload_counters(ctx, &last_events, &last_promotions, &last_demotions);
     uint64_t last_tsc = ctx->start_tsc;
 
     while (ctx->running) {
@@ -126,11 +203,12 @@ void stats_coroutine(mco_coro *co)
         }
         uint64_t now = rdtsc();
         double elapsed_sec = (double)(now - last_tsc) / ctx->tsc_freq_hz;
-        pact_stats_t *st = &ctx->workload->stats;
+        uint64_t events, promotions, demotions;
+        sum_workload_counters(ctx, &events, &promotions, &demotions);
 
-        uint64_t events_delta = st->pebs_events_processed - last_stats.pebs_events_processed;
-        uint64_t promotions_delta = st->promotion_successes - last_stats.promotion_successes;
-        uint64_t demotions_delta = st->demotion_successes - last_stats.demotion_successes;
+        uint64_t events_delta = events - last_events;
+        uint64_t promotions_delta = promotions - last_promotions;
+        uint64_t demotions_delta = demotions - last_demotions;
 
         log_info("stats_coroutine",
                  "Time passed %.2fs, Events: %lu/sec, Pages promoted: %lu/sec, "
@@ -139,11 +217,13 @@ void stats_coroutine(mco_coro *co)
                  (uint64_t)(promotions_delta / elapsed_sec),
                  (uint64_t)(demotions_delta / elapsed_sec), total_hash_entries(ctx));
 
-        log_info("stats_coroutine", "  PAC: pool_alloc_skip=%lu", st->pool_alloc_skipped);
+        log_info("stats_coroutine", "  PAC: pool_alloc_skip=%lu", ctx->stats.pool_alloc_skipped);
         log_workload_summary(ctx);
         log_pac_telemetry(ctx);
 
-        last_stats = *st;
+        last_events = events;
+        last_promotions = promotions;
+        last_demotions = demotions;
         last_tsc = now;
         mco_yield(co);
     }

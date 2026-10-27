@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Copyright (c) 2026 MoatLab, Virginia Tech. */
-/* usage.h — CLI usage/help printer. */
+/* usage.h: CLI usage/help printer. */
 
 #ifndef PACT_USAGE_H
 #define PACT_USAGE_H

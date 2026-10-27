@@ -6,9 +6,18 @@ LDFLAGS = -lm -lnuma -lpthread
 
 TARGET  = pact
 
+# Optional diagnostics build: `make DIAG=1` defines PACT_DIAG and adds
+# diag.c, which provide --dump-pac-table, --dump-pac-interval,
+# --no-promote-wl and --cat-trace.
+ifeq ($(DIAG),1)
+CFLAGS += -DPACT_DIAG
+DIAG_SOURCES = diag.c
+endif
+
 # All sources except logging.c, which is an optional build (its symbols are
-# no-ops via logging.h unless PACT_ENABLE_LOGGING is set; see `make logging`).
-SOURCES = $(filter-out logging.c,$(wildcard *.c))
+# no-ops via logging.h unless PACT_ENABLE_LOGGING is set; see `make logging`),
+# and diag.c (see DIAG above).
+SOURCES = $(filter-out logging.c diag.c,$(wildcard *.c)) $(DIAG_SOURCES)
 OBJECTS = $(SOURCES:.c=.o)
 DEPS    = $(OBJECTS:.o=.d)
 
@@ -46,7 +55,8 @@ $(TARGET): $(OBJECTS)
 # Optional build with file logging enabled.
 logging:
 	$(MAKE) clean
-	$(MAKE) CFLAGS="$(CFLAGS) -DPACT_ENABLE_LOGGING" SOURCES="$(wildcard *.c)"
+	$(MAKE) CFLAGS="$(CFLAGS) -DPACT_ENABLE_LOGGING" \
+	    SOURCES="$(filter-out diag.c,$(wildcard *.c)) $(DIAG_SOURCES)"
 
 clean:
 	rm -f *.o *.d $(TARGET) build-info.h .buildflags
@@ -55,10 +65,13 @@ clean:
 # check-style: grep-based brace-style check, no dependencies.
 # check-format: full clang-format check. Prefer clang-format-18 (the
 # version CI pins, so local and CI agree), fall back to the unversioned
-# binary, or override with CLANG_FORMAT=<binary>.
+# binary, or override with CLANG_FORMAT=<binary>. The check also covers the
+# C files in tests/ and run/tools/. Those directories have no .clang-format,
+# so the style file is passed explicitly.
 CLANG_FORMAT ?= $(shell command -v clang-format-18 || command -v clang-format)
 CLANG_FORMAT_VER = $(shell $(CLANG_FORMAT) --version 2>/dev/null | grep -oE '[0-9]+' | head -1)
-FMT_SRCS = $(filter-out khashl.h minicoro.h build-info.h,$(wildcard *.c *.h))
+FMT_SRCS = $(filter-out khashl.h minicoro.h build-info.h,$(wildcard *.c *.h)) \
+	$(wildcard ../tests/*.c ../tests/*.h ../run/tools/*.c ../run/tools/*.h)
 
 # .clang-format uses InsertBraces (clang-format >= 15); the style is pinned to
 # 16+. Ubuntu 22.04's unversioned clang-format is 14 and would spew "unknown
@@ -74,10 +87,10 @@ check-style:
 	bash check-style.sh
 format:
 	$(require_clang_format)
-	$(CLANG_FORMAT) -i $(FMT_SRCS)
+	$(CLANG_FORMAT) --style=file:.clang-format -i $(FMT_SRCS)
 check-format:
 	$(require_clang_format)
-	$(CLANG_FORMAT) --dry-run -Werror $(FMT_SRCS)
+	$(CLANG_FORMAT) --style=file:.clang-format --dry-run -Werror $(FMT_SRCS)
 
 .PHONY: test-event-loop-startup
 test-event-loop-startup:
@@ -108,6 +121,22 @@ test-thread-coverage:
 	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. -pthread \
 	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
 	    ../tests/test-thread-coverage.c perf.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-thread-exit
+test-thread-exit:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. -pthread \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-thread-exit.c perf.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-workload-gone
+test-workload-gone:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+	    ../tests/test-workload-gone.c utils.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
 
 .PHONY: test-workload-exit
@@ -147,7 +176,8 @@ test-bin-index:
 	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
 	    -fsanitize=address,undefined,float-cast-overflow -fno-sanitize-recover=all \
 	    -ffunction-sections -fdata-sections \
-	    ../tests/test-bin-index.c cooling.c obj-pool.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	    ../tests/test-bin-index.c admission.c binning.c cooling.c obj-pool.c error.c \
+	    -Wl,--gc-sections -lm -lnuma -o "$$test_bin"; \
 	"$$test_bin"
 
 .PHONY: test-binning
@@ -171,7 +201,8 @@ test-pac-threshold:
 	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
 	    -fsanitize=address,undefined,float-cast-overflow -fno-sanitize-recover=all \
 	    -ffunction-sections -fdata-sections \
-	    ../tests/test-pac-threshold.c cooling.c obj-pool.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	    ../tests/test-pac-threshold.c admission.c binning.c cooling.c obj-pool.c error.c \
+	    -Wl,--gc-sections -lm -lnuma -o "$$test_bin"; \
 	"$$test_bin"
 
 .PHONY: test-quiet-stats
@@ -188,9 +219,10 @@ test-startup-alloc:
 	@set -eu; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
 	$(CC) -D_GNU_SOURCE -I. -O1 -g -ffunction-sections -fdata-sections \
 	    -fsanitize=undefined -fno-sanitize-recover=all \
-	    ../tests/test-startup-alloc.c config.c error.c obj-pool.c \
+	    ../tests/test-startup-alloc.c admission.c binning.c config.c error.c obj-pool.c \
+	    cgroup.c cat.c ldlat-dyn.c utils.c \
 	    -Wl,--gc-sections -Wl,--wrap=calloc -Wl,--wrap=free \
-	    -Wl,--wrap=sched_getaffinity -lm -o "$$test_bin"; \
+	    -Wl,--wrap=sched_getaffinity -lm -lnuma -o "$$test_bin"; \
 	python3 ../tests/test-startup-alloc.py "$$test_bin"
 
 .PHONY: test-pool-limit
@@ -198,7 +230,7 @@ test-pool-limit:
 	@set -eu; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
 	$(CC) -D_GNU_SOURCE -I. -O1 -g -ffunction-sections -fdata-sections \
 	    -fsanitize=undefined -fno-sanitize-recover=all \
-	    ../tests/test-pool-limit.c cli.c config.c error.c obj-pool.c \
+	    ../tests/test-pool-limit.c cli.c config.c error.c obj-pool.c ldlat-dyn.c cgroup.c cat.c \
 	    -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"
 
@@ -252,4 +284,143 @@ test-migration-recovery:
 	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
 	    -fsanitize=address,undefined -ffunction-sections -fdata-sections \
 	    ../tests/test-migration-recovery.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-cli-modes
+test-cli-modes:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-cli-modes.c cli.c config.c validate.c utils.c error.c ldlat-dyn.c \
+	    cgroup.c cat.c \
+	    -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin" 2>/dev/null
+
+.PHONY: test-tierce-admission
+test-tierce-admission:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-tierce-admission.c admission.c binning.c error.c \
+	    -Wl,--gc-sections -lm -lnuma -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-workload-mlp
+test-workload-mlp:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-workload-mlp.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-domain-round-robin
+test-domain-round-robin:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-domain-round-robin.c error.c -Wl,--gc-sections -lm -lpthread \
+	    -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-tierce-sampling
+test-tierce-sampling:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-tierce-sampling.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-ldlat-dyn
+test-ldlat-dyn:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-ldlat-dyn.c ldlat-dyn.c cgroup.c error.c -Wl,--gc-sections -lm \
+	    -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-cat-control
+test-cat-control:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-cat-control.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-cat-start
+test-cat-start:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-cat-start.c perf.c error.c -Wl,--gc-sections -lm -lpthread \
+	    -o "$$test_bin"; \
+	"$$test_bin"
+
+# The diagnostics build compiles and lists its options; the mode tests and
+# the PAC-table dump test run with PACT_DIAG. Built in temporary files, so
+# the normal build stays.
+.PHONY: test-diag-build
+test-diag-build: build-info.h
+	@set -e; test_bin=$$(mktemp); cli_bin=$$(mktemp); \
+	trap 'rm -f "$$test_bin" "$$cli_bin"' EXIT; \
+	$(CC) -Wall -Wextra -Werror -O2 -D_GNU_SOURCE -I. -DPACT_DIAG \
+	    $(filter-out logging.c,$(wildcard *.c)) -o "$$test_bin" $(LDFLAGS); \
+	help=$$("$$test_bin" --help); \
+	for opt in --dump-pac-table --dump-pac-interval --no-promote-wl --cat-trace \
+	    --trace-migration; do \
+	    case "$$help" in *"$$opt"*) ;; *) echo "missing $$opt in DIAG help"; exit 1;; esac; \
+	done; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. -DPACT_DIAG \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-cli-modes.c cli.c config.c validate.c utils.c error.c ldlat-dyn.c \
+	    cgroup.c cat.c diag.c -Wl,--gc-sections -lm -o "$$cli_bin"; \
+	"$$cli_bin" >/dev/null 2>&1; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. -DPACT_DIAG \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-pac-dump.c diag.c admission.c binning.c error.c \
+	    -Wl,--gc-sections -lm -lnuma -o "$$cli_bin"; \
+	"$$cli_bin"; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. -DPACT_DIAG \
+	    -fsanitize=address,undefined,float-cast-overflow -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-bin-index.c admission.c binning.c cooling.c obj-pool.c error.c diag.c \
+	    -Wl,--gc-sections -lm -lnuma -o "$$cli_bin"; \
+	"$$cli_bin"
+
+.PHONY: test-migration-trace
+test-migration-trace:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-migration-trace.c trace.c balance.c cgroup.c utils.c error.c \
+	    -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-cgroup
+test-cgroup:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-cgroup.c cgroup.c balance.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
+	"$$test_bin"
+
+.PHONY: test-pact-global
+test-pact-global:
+	@set -e; test_bin=$$(mktemp); trap 'rm -f "$$test_bin"' EXIT; \
+	$(CC) -Wall -Wextra -O1 -g -D_GNU_SOURCE -I. \
+	    -fsanitize=address,undefined -fno-sanitize-recover=all \
+	    -ffunction-sections -fdata-sections \
+	    ../tests/test-pact-global.c error.c -Wl,--gc-sections -lm -o "$$test_bin"; \
 	"$$test_bin"

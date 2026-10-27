@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use PACT, please cite the ASPLOS 2026 paper below."
+message: "If you use this software, please cite the PACT (ASPLOS 2026) and Tierce (SOSP 2026) papers below."
 title: "PACT: A Criticality-First Design for Tiered Memory"
 abstract: >-
   PACT is a user-space Linux runtime for tiered memory. It attaches to an
@@ -31,8 +31,9 @@ preferred-citation:
   title: "PACT: A Criticality-First Design for Tiered Memory"
   year: 2026
   collection-title: >-
-    Proceedings of the 31st ACM International Conference on Architectural
-    Support for Programming Languages and Operating Systems (ASPLOS)
+    International Conference on Architectural Support for Programming
+    Languages and Operating Systems (ASPLOS '26)
+  doi: "10.1145/3779212.3790198"
   authors:
     - family-names: Hadian
       given-names: Hamid
@@ -44,3 +45,20 @@ preferred-citation:
       given-names: Hansen
     - family-names: Li
       given-names: Huaicheng
+references:
+  - type: conference-paper
+    title: "Tierce: Observability-Driven Tiered Memory Management for Colocated Workloads"
+    year: 2026
+    collection-title: "Symposium on Operating Systems Principles (SOSP '26)"
+    doi: "10.1145/3830418.3843905"
+    authors:
+      - family-names: Xu
+        given-names: Hanchen
+      - family-names: Inceisci
+        given-names: Berkay
+      - family-names: Li
+        given-names: Hao
+      - family-names: Zhang
+        given-names: Zhenyu
+      - family-names: Li
+        given-names: Huaicheng
